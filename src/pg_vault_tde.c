@@ -925,6 +925,8 @@ tde_process_utility_hook(PlannedStmt *pstmt,
                 if (rel != NULL)
                 {
                     bool guard = tde_rel_or_inheritors_use_encrypted_heap(rid);
+                    
+                    relation_close(rel, NoLock);
 
                     if (guard && !tde_is_safe_index_am(stmt->accessMethod))
                     {
@@ -951,7 +953,6 @@ tde_process_utility_hook(PlannedStmt *pstmt,
                                         "pg_vault_tde.allow_plaintext_index = on to allow "
                                         "this with a WARNING.")));
                     }
-                    relation_close(rel, NoLock);
                 }
             }
 

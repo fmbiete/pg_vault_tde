@@ -153,6 +153,8 @@ pg_vault_tde_rotate_online_sql(PG_FUNCTION_ARGS)
 
     /* Wait up to 5 seconds for the BGW to start */
     status = WaitForBackgroundWorkerStartup(handle, &pid);
+    pfree(handle);
+
     if (status == BGWH_POSTMASTER_DIED)
         ereport(ERROR,
                 (errmsg("pg_vault_tde_rotate_online: postmaster died before "
@@ -162,8 +164,6 @@ pg_vault_tde_rotate_online_sql(PG_FUNCTION_ARGS)
         ereport(WARNING,
                 (errmsg("pg_vault_tde_rotate_online: rotation BGW stopped "
                         "immediately — check server log")));
-
-    pfree(handle);
 
     ereport(NOTICE,
             (errmsg("pg_vault_tde_rotate_online: rotation started for "

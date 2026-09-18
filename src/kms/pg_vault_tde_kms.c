@@ -864,7 +864,7 @@ vault_provider_rewrap_dek(const unsigned char *old_wrapped, int old_len,
     char               *post_body = NULL;
     char               *wrapped   = NULL;
     char                path[512];
-    bool                success   = false;
+    volatile bool       success   = false;
 
     post_body = palloc(old_len + 64);
     snprintf(post_body, old_len + 64, "{\"ciphertext\": \"%.*s\"}",
@@ -874,38 +874,49 @@ vault_provider_rewrap_dek(const unsigned char *old_wrapped, int old_len,
              pg_vault_tde_vault_transit_mount,
              pg_vault_tde_vault_key_name);
 
-    if (vault_transit_request(path, post_body, &resp))
+    PG_TRY();
     {
-        wrapped = vault_json_extract_string(resp.data, "ciphertext");
-        if (wrapped != NULL)
+        if (vault_transit_request(path, post_body, &resp))
         {
-            size_t wrapped_len = strlen(wrapped);
-
-            if ((int) wrapped_len > *new_len)
+            wrapped = vault_json_extract_string(resp.data, "ciphertext");
+            if (wrapped != NULL)
             {
-                OPENSSL_cleanse(wrapped, wrapped_len);
-                pfree(wrapped);
-                ereport(ERROR,
-                        errmsg("pg_vault_tde: rewrapped DEK (%zu) exceeds buffer (%d)",
-                                wrapped_len, *new_len));
+				size_t wrapped_len = strlen(wrapped);
+           
+                if ((int) wrapped_len > *new_len)
+                {
+                    ereport(ERROR,
+                            errmsg("pg_vault_tde: rewrapped DEK (%zu) exceeds buffer (%d)",
+                                    	wrapped_len, *new_len));
+                }
+           
+                memcpy(new_wrapped, wrapped, wrapped_len);
+                *new_len = (int) wrapped_len;           
+                success = true;
             }
-
-            memcpy(new_wrapped, wrapped, wrapped_len);
-            *new_len = (int) wrapped_len;
-
-            OPENSSL_cleanse(wrapped, wrapped_len);
-            pfree(wrapped);
-            wrapped = NULL;
-            success = true;
+        }
+        else
+        {
+            ereport(ERROR,
+                    errmsg("pg_vault_tde: kms vault: can't rewrap DEK"));
         }
     }
-    else
-        ereport(ERROR,
-                errmsg("pg_vault_tde: kms vault: can't rewrap DEK"));
+    PG_FINALLY();
+    {
+        if (wrapped)
+        {
+            OPENSSL_cleanse(wrapped, strlen(wrapped));
+            pfree(wrapped);
+        }
+        if (post_body)
+        {
+        	OPENSSL_cleanse(post_body, strlen(post_body));
+            pfree(post_body);
+        }
+        vault_resp_free(&resp);        
+    }
+    PG_END_TRY();
 
-    vault_resp_free(&resp);
-    OPENSSL_cleanse(post_body, strlen(post_body));
-    pfree(post_body);
 
     return success;
 }
@@ -1350,10 +1361,10 @@ vault_provider_wrap_dek(const unsigned char *dek, int dek_len,
                         unsigned char *wrapped_out, int *out_len)
 {
     vault_response_buf  resp;
-    char               *ciphertext = NULL;
+    char * volatile 	ciphertext = NULL;
     char               *post_body  = NULL;
     char                path[512];
-    bool                success    = false;
+    volatile bool       success    = false;
     size_t              b64_len    = ((dek_len + 2) / 3) * 4 + 1;
     char               *b64_dek   = palloc(b64_len);
 
@@ -1369,33 +1380,40 @@ vault_provider_wrap_dek(const unsigned char *dek, int dek_len,
              pg_vault_tde_vault_transit_mount,
              pg_vault_tde_vault_key_name);
 
-    if (vault_transit_request(path, post_body, &resp))
-    {
-        ciphertext = vault_json_extract_string(resp.data, "ciphertext");
-        if (ciphertext != NULL)
-        {
-            size_t ct_len = strlen(ciphertext);
+	PG_TRY();
+	{
+		if (vault_transit_request(path, post_body, &resp))
+		{
+			ciphertext = vault_json_extract_string(resp.data, "ciphertext");
+			if (ciphertext != NULL)
+			{
+				size_t ct_len = strlen((const char*) ciphertext);
+	
+				if (ct_len > (size_t) *out_len)
+					ereport(ERROR, errmsg("pg_vault_tde: wrapped DEK (%zu) exceeds buffer (%d)",
+										  ct_len, *out_len));
+				memcpy(wrapped_out, (const char*) ciphertext, ct_len);
+				*out_len = (int) ct_len;
+				success = true;
+			}
+		}
+	}
+	PG_FINALLY();
+	{
+		if (post_body)
+		{
+			OPENSSL_cleanse(post_body, strlen(post_body));
+			pfree(post_body);
+		}
+		vault_resp_free(&resp);
+		if (ciphertext)
+		{
+			OPENSSL_cleanse((char *) ciphertext, strlen((const char *) ciphertext));
+			pfree((char *) ciphertext);
+		}
+	}
+	PG_END_TRY();
 
-            if (ct_len > (size_t) *out_len)
-                ereport(ERROR, errmsg("pg_vault_tde: wrapped DEK (%zu) exceeds buffer (%d)",
-                                      ct_len, *out_len));
-            memcpy(wrapped_out, ciphertext, ct_len);
-            *out_len = (int) ct_len;
-            success = true;
-        }
-    }
-
-    if (post_body)
-    {
-        OPENSSL_cleanse(post_body, strlen(post_body));
-        pfree(post_body);
-    }
-    vault_resp_free(&resp);
-    if (ciphertext)
-    {
-        OPENSSL_cleanse(ciphertext, strlen(ciphertext));
-        pfree(ciphertext);
-    }
     return success;
 }
 
