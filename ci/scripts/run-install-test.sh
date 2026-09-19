@@ -323,7 +323,10 @@ apt-get install -y -q \
 # ── Build package from source ──────────────────────────────────────────
 echo '--- Building DEB ---'
 mkdir -p /build
-tar -C /src --exclude=./.git --exclude=./test/tap --exclude=./ci/docker-data -cf - . | tar -C /build -xf -
+tar -C /src --exclude=./.git --exclude=./test/tap --exclude=./ci/docker-data \
+    --exclude='./tmp_*' --exclude=./results --exclude=./log --exclude=./output_iso \
+    --exclude=./regression.diffs --exclude=./regression.out \
+    -cf - . | tar -C /build -xf -
 cd /build
 bash packaging/build_deb.sh --no-sign --pg-version ${pg}
 DEB=\$(ls /build/../postgresql-${pg}-pg-vault-tde_*.deb | head -1)
@@ -402,7 +405,10 @@ dnf install -y -q \
 echo '--- Building RPM ---'
 export PATH=\"/usr/pgsql-${pg}/bin:\$PATH\"
 mkdir -p /build
-tar -C /src --exclude=./.git --exclude=./test/tap --exclude=./ci/docker-data -cf - . | tar -C /build -xf -
+tar -C /src --exclude=./.git --exclude=./test/tap --exclude=./ci/docker-data \
+    --exclude='./tmp_*' --exclude=./results --exclude=./log --exclude=./output_iso \
+    --exclude=./regression.diffs --exclude=./regression.out \
+    -cf - . | tar -C /build -xf -
 cd /build
 bash packaging/build_rpm.sh --pg-version ${pg}
 RPM=\$(find ~/rpmbuild/RPMS -name \"postgresql${pg}-pg_vault_tde-*.rpm\" \
