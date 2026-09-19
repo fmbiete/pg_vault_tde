@@ -41,7 +41,6 @@ log_ok "Image $AN_IMAGE built"
 
 $RT rm -f "$CONTAINER" 2>/dev/null || true
 $RT run -d --name "$CONTAINER" --entrypoint sleep "$AN_IMAGE:latest" infinity >/dev/null
-$RT cp "$REPO_ROOT/." "$CONTAINER:/build" 2>/dev/null
 
 log_info "Locating the ccc-analyzer wrapper ..."
 CCC=$($RT exec "$CONTAINER" bash -c \
