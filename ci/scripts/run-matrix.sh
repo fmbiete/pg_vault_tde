@@ -45,14 +45,36 @@ PG_MAJORS="${PG_MAJORS:-17 19}"
 log_stage "CROSS-VERSION MATRIX (PG $PG_MAJORS — regress + tap)"
 
 RC=0
+RAN=0
 declare -a SUMMARY=()
 
 for major in $PG_MAJORS; do
-    if ! $RT manifest inspect "docker.io/library/postgres:${major}" >/dev/null 2>&1; then
-        log_warn "PG ${major}: base image not published yet — SKIPPED"
-        SUMMARY+=("  PG ${major}  SKIPPED (no postgres:${major} image)")
+    # Availability is decided by an actual pull, not by `manifest inspect`.
+    #
+    # manifest inspect needs the experimental CLI on docker and an authenticated
+    # registry query; where either is missing it fails for reasons that have
+    # nothing to do with the tag existing.  The first version of this script
+    # treated that failure as "not published yet" and skipped -- so on a docker
+    # runner every major was skipped and the stage still reported success,
+    # which is the worst outcome available: a green stage that ran nothing.
+    #
+    # A pull tells the two apart.  Only a registry saying the tag does not exist
+    # is a skip; anything else (no network, rate limit, auth) is a failure,
+    # because we cannot claim coverage we did not obtain.
+    PULL_OUT=$($RT pull "docker.io/library/postgres:${major}" 2>&1)
+    if [ $? -ne 0 ]; then
+        if echo "$PULL_OUT" | grep -qiE "manifest unknown|not found|manifest for .* not found|no such (image|manifest)"; then
+            log_warn "PG ${major}: base image not published yet — SKIPPED"
+            SUMMARY+=("  PG ${major}  SKIPPED (registry: no postgres:${major})")
+            continue
+        fi
+        log_error "PG ${major}: cannot reach the registry — NOT a skip"
+        echo "$PULL_OUT" | tail -3
+        RC=14
+        SUMMARY+=("  PG ${major}  FAILED (could not pull postgres:${major})")
         continue
     fi
+    RAN=$((RAN + 1))
 
     log_info "── PG ${major} ───────────────────────────────────────────────"
 
@@ -84,5 +106,13 @@ if [ "$RC" -ne 0 ]; then
     exit "$RC"
 fi
 
-log_ok "MATRIX: every suite passed on every available major"
+# Zero majors exercised is not success.  Reporting green here is how the first
+# version of this script hid the fact that it was testing nothing at all.
+if [ "$RAN" -eq 0 ]; then
+    log_error "MATRIX: no major was exercised — nothing was tested"
+    log_error "  PG_MAJORS='$PG_MAJORS' and none of them could be pulled."
+    exit 14
+fi
+
+log_ok "MATRIX: $RAN major(s) exercised, every suite passed"
 exit 0
