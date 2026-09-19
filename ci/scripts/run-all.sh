@@ -3,7 +3,7 @@
 #
 # Runs all test stages in sequence:
 #   1. regress     — 140-test SQL regression suite (52 v1.4 + 20 v1.5 + 38 v1.6 + 30 v1.7)
-#   1b. regress-matrix — the same suite on the other supported PG majors
+#   1b. matrix      — regress + tap on the other supported PG majors
 #   1c. errorpath  — 13-test error-path suite: the PG_CATCH handlers (141-153)
 #   2. checksums   — Page checksum compatibility
 #   3. tap         — Perl TAP tests (extension load, backup hooks)
@@ -97,7 +97,7 @@ while [[ $# -gt 0 ]]; do
         --help|-h)
             echo "Usage: $0 [--skip-bench] [--skip-openbao] [--skip-wallet] [--skip-install-test] [--skip-valgrind] [--skip-deep] [--skip-matrix] [--only stage1 stage2 ...]"
             echo ""
-            echo "Stages: regress regress-matrix errorpath checksums tap isolation vault openbao wallet pkcs11 schema scan-build ubsan valgrind cassert install-test bench"
+            echo "Stages: regress matrix errorpath checksums tap isolation vault openbao wallet pkcs11 schema scan-build ubsan valgrind cassert install-test bench"
             exit 0
             ;;
         *)
@@ -110,7 +110,7 @@ done
 # ---------------------------------------------------------------------------
 # Stage definitions
 # ---------------------------------------------------------------------------
-ALL_STAGES=(regress regress-matrix errorpath checksums tap isolation vault openbao wallet pkcs11 schema scan-build ubsan valgrind cassert install-test bench)
+ALL_STAGES=(regress matrix errorpath checksums tap isolation vault openbao wallet pkcs11 schema scan-build ubsan valgrind cassert install-test bench)
 
 should_run() {
     local stage="$1"
@@ -138,7 +138,7 @@ should_run() {
     if [[ "$stage" == "valgrind" && "$SKIP_VALGRIND" == "1" ]]; then
         return 1
     fi
-    if [[ "$stage" == "regress-matrix" && "$SKIP_MATRIX" == "1" ]]; then
+    if [[ "$stage" == "matrix" && "$SKIP_MATRIX" == "1" ]]; then
         return 1
     fi
     if [[ "$SKIP_DEEP" == "1" ]]; then
