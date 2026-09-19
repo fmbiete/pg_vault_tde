@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# ci/scripts/run-regress-matrix.sh — Run the SQL regression suite on the
-# supported PostgreSQL majors OTHER than the default one.
+# ci/scripts/run-matrix.sh — Run the SQL regression suite AND the TAP suite on
+# the supported PostgreSQL majors OTHER than the default one.
 #
 # The packaging matrix (packaging/build-matrix.json) already covers PG 17..19,
 # but only for *installing* the package.  Every test stage runs against a single
@@ -11,16 +11,24 @@
 # requirement in heapgettup, and the TAM/IAM impersonate core structures whose
 # layout and identity checks move between majors.
 #
-# 18 is deliberately absent from the default list: the ordinary `regress` stage
-# already runs it, and repeating it here would just double that cost.
+# The TAP suite is in here for a reason, learned the hard way: tap/20_ondisk_fuzz.t
+# passed locally on PG 18 and broke the GitHub pipeline on PG 17, because
+# initdb's --no-data-checksums flag only exists from PG 18.  TAP tests lean on
+# the PostgreSQL::Test framework and on initdb/pg_ctl option spellings, all of
+# which move between majors far more than SQL does -- so they are exactly the
+# stage that most needs cross-version coverage, and the one that had none.
+#
+# 18 is deliberately absent from the default list: the ordinary `regress` and
+# `tap` stages already run it, and repeating it here would just double that
+# cost.
 #
 # A major whose base image does not exist yet is SKIPPED, not failed -- PG 19 is
 # still in development at the time of writing, and this stage starts covering it
 # by itself the day docker.io/library/postgres:19 is published.  Override with:
 #
-#     PG_MAJORS="17 19" make ci-regress-matrix
+#     PG_MAJORS="17 19" make ci-matrix
 #
-# Exit code: 0 if every available major passed, 14 otherwise.
+# Exit code: 0 if every suite passed on every available major, 14 otherwise.
 #
 # Copyright (c) 2026 Miriade S.r.l. — PostgreSQL License (BSD)
 
@@ -34,7 +42,7 @@ set +e
 
 PG_MAJORS="${PG_MAJORS:-17 19}"
 
-log_stage "REGRESSION MATRIX (PG $PG_MAJORS)"
+log_stage "CROSS-VERSION MATRIX (PG $PG_MAJORS — regress + tap)"
 
 RC=0
 declare -a SUMMARY=()
@@ -47,21 +55,23 @@ for major in $PG_MAJORS; do
     fi
 
     log_info "── PG ${major} ───────────────────────────────────────────────"
-    START=$(timer_start)
 
     # A per-major image tag, so the majors do not overwrite each other's build
     # and the default pg-tde-test:latest used by every other stage is left
     # alone.
-    if PG_VERSION="$major" \
-       PG_TEST_IMAGE="pg-tde-test-pg${major}" \
-       bash "$SCRIPT_DIR/run-regress.sh"; then
-        SUMMARY+=("  PG ${major}  PASSED ($(timer_fmt "$(timer_elapsed "$START")"))")
-        log_ok "PG ${major}: regression suite passed"
-    else
-        RC=14
-        SUMMARY+=("  PG ${major}  FAILED ($(timer_fmt "$(timer_elapsed "$START")"))")
-        log_error "PG ${major}: regression suite FAILED"
-    fi
+    for suite in regress tap; do
+        START=$(timer_start)
+        if PG_VERSION="$major" \
+           PG_TEST_IMAGE="pg-tde-test-pg${major}" \
+           bash "$SCRIPT_DIR/run-${suite}.sh"; then
+            SUMMARY+=("  PG ${major}  ${suite}   PASSED ($(timer_fmt "$(timer_elapsed "$START")"))")
+            log_ok "PG ${major}: ${suite} suite passed"
+        else
+            RC=14
+            SUMMARY+=("  PG ${major}  ${suite}   FAILED ($(timer_fmt "$(timer_elapsed "$START")"))")
+            log_error "PG ${major}: ${suite} suite FAILED"
+        fi
+    done
 done
 
 echo ""
@@ -70,9 +80,9 @@ printf '%s\n' "${SUMMARY[@]}"
 echo ""
 
 if [ "$RC" -ne 0 ]; then
-    log_error "REGRESSION MATRIX: at least one major failed"
+    log_error "MATRIX: at least one suite failed"
     exit "$RC"
 fi
 
-log_ok "REGRESSION MATRIX: every available major passed"
+log_ok "MATRIX: every suite passed on every available major"
 exit 0
