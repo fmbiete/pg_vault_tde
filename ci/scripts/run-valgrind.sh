@@ -150,6 +150,15 @@ mkdir -p "$OUT_DIR"
 rm -f "$OUT_DIR"/vg.*.log
 $RT cp "$CONTAINER:/tmp/valgrind" "$OUT_DIR/" 2>/dev/null || true
 find "$OUT_DIR" -name 'vg.*.log' -exec mv -t "$OUT_DIR" {} + 2>/dev/null || true
+rmdir "$OUT_DIR/valgrind" 2>/dev/null || true
+
+# valgrind writes some logs 0600 under the container's uid.  The packaging
+# build copies the working tree from inside a container that cannot then read
+# them, which fails the tarball rather than merely bloating it (the excludes in
+# run-install-test.sh and build_rpm.sh cover that too -- belt and braces, since
+# anyone reading these reports by hand hits the same wall).
+chmod -R u+rwX "$OUT_DIR" 2>/dev/null || true
+
 LOGS=$(find "$OUT_DIR" -name 'vg.*.log' | wc -l)
 log_info "Collected $LOGS memcheck logs into ${OUT_DIR#"$REPO_ROOT"/}/"
 
