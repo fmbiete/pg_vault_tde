@@ -326,6 +326,7 @@ mkdir -p /build
 tar -C /src --exclude=./.git --exclude=./test/tap --exclude=./ci/docker-data \
     --exclude='./tmp_*' --exclude=./results --exclude=./log --exclude=./output_iso \
     --exclude=./regression.diffs --exclude=./regression.out \
+    --exclude='*.o' --exclude='*.bc' --exclude='*.so' \
     -cf - . | tar -C /build -xf -
 cd /build
 bash packaging/build_deb.sh --no-sign --pg-version ${pg}
@@ -408,6 +409,7 @@ mkdir -p /build
 tar -C /src --exclude=./.git --exclude=./test/tap --exclude=./ci/docker-data \
     --exclude='./tmp_*' --exclude=./results --exclude=./log --exclude=./output_iso \
     --exclude=./regression.diffs --exclude=./regression.out \
+    --exclude='*.o' --exclude='*.bc' --exclude='*.so' \
     -cf - . | tar -C /build -xf -
 cd /build
 bash packaging/build_rpm.sh --pg-version ${pg}
