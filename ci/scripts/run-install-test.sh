@@ -327,8 +327,20 @@ tar -C /src --exclude=./.git --exclude=./test/tap --exclude=./ci/docker-data \
     --exclude='./tmp_*' --exclude=./results --exclude=./log --exclude=./output_iso \
     --exclude=./regression.diffs --exclude=./regression.out \
     --exclude='*.o' --exclude='*.bc' --exclude='*.so' \
+    --exclude=./pg_dump_tde --exclude=./pg_restore_tde \
+    --exclude=./pg_basebackup_tde \
     -cf - . | tar -C /build -xf -
 cd /build
+
+# Never build on top of whatever the copy brought in.  The tar above takes the
+# live working tree, so a developer building on the host — or the tail end of a
+# long "make ci-all", where this stage runs last — leaves objects and linked
+# binaries behind that make would consider up to date.  Packaging those ships a
+# binary linked against the HOST's glibc and libcurl: on this machine that meant
+# RPMs requiring GLIBC_2.38 and CURL_OPENSSL_4, which no EL9 can install.  The
+# excludes above catch *.o/*.bc/*.so; the frontend binaries have no extension,
+# so clean is the guarantee rather than the enumeration.
+make clean >/dev/null 2>&1 || true
 bash packaging/build_deb.sh --no-sign --pg-version ${pg}
 DEB=\$(ls /build/../postgresql-${pg}-pg-vault-tde_*.deb | head -1)
 echo \"Built: \$(basename \$DEB)\"
@@ -410,8 +422,20 @@ tar -C /src --exclude=./.git --exclude=./test/tap --exclude=./ci/docker-data \
     --exclude='./tmp_*' --exclude=./results --exclude=./log --exclude=./output_iso \
     --exclude=./regression.diffs --exclude=./regression.out \
     --exclude='*.o' --exclude='*.bc' --exclude='*.so' \
+    --exclude=./pg_dump_tde --exclude=./pg_restore_tde \
+    --exclude=./pg_basebackup_tde \
     -cf - . | tar -C /build -xf -
 cd /build
+
+# Never build on top of whatever the copy brought in.  The tar above takes the
+# live working tree, so a developer building on the host — or the tail end of a
+# long "make ci-all", where this stage runs last — leaves objects and linked
+# binaries behind that make would consider up to date.  Packaging those ships a
+# binary linked against the HOST's glibc and libcurl: on this machine that meant
+# RPMs requiring GLIBC_2.38 and CURL_OPENSSL_4, which no EL9 can install.  The
+# excludes above catch *.o/*.bc/*.so; the frontend binaries have no extension,
+# so clean is the guarantee rather than the enumeration.
+make clean >/dev/null 2>&1 || true
 bash packaging/build_rpm.sh --pg-version ${pg}
 RPM=\$(find ~/rpmbuild/RPMS -name \"postgresql${pg}-pg_vault_tde-*.rpm\" \
            ! -name '*debuginfo*' ! -name '*debugsource*' | head -1)
