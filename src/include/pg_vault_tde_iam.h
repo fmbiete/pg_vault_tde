@@ -13,13 +13,11 @@
 #include "utils/uuid.h"          /* DatumGetUUIDP, pg_uuid_t */
 
 /*
- * AES-256-SIV key encryption/decryption for B-Tree index entries.
+ * AES-256-SIV key encryption for B-Tree index entries.
  * Callers MUST OPENSSL_cleanse + pfree the returned buffers after use.
  */
 char *tde_iam_encrypt_key(Oid idx_oid, const char* dek, int dek_len,
                           const char *plaintext, Size plaintext_len, Size *out_len);
-char *tde_iam_decrypt_key(Oid idx_oid, const char* dek, int dek_len,
-                          const char *ciphertext, Size ciphertext_len, Size *out_len);
 
 /*
  * tde_iam_is_tde_btree_index — is this index built/maintained by our

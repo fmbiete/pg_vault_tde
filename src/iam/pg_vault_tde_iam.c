@@ -93,7 +93,6 @@ typedef struct TdeCipherSlot
 } TdeCipherSlot;
 
 static TdeCipherSlot idx_enc = {NULL, InvalidOid, 0, {0}};
-static TdeCipherSlot idx_dec = {NULL, InvalidOid, 0, {0}};
 
 /* Free a slot and wipe its cached key (shared by cleanup and error paths). */
 static void
@@ -117,7 +116,6 @@ void
 tde_iam_ctx_cleanup(void)
 {
     tde_iam_ctx_drop(&idx_enc);
-    tde_iam_ctx_drop(&idx_dec);
 }
 
 /*
@@ -249,62 +247,6 @@ tde_iam_encrypt_key(Oid idx_oid, const char* dek, int dek_len,
     }
 
     *out_len = (Size)(TDE_SIV_OVERHEAD + olen1 + olen2);
-    return out_buf;
-}
-
-/*
- * tde_iam_decrypt_key
- *
- * Decrypts an AES-256-SIV encrypted index key back to plaintext.
- * Returns a palloc'd buffer.  Caller MUST OPENSSL_cleanse + pfree after use.
- *
- * @param ciphertext      encrypted key buffer
- * @param ciphertext_len  length including SIV overhead
- * @param out_len         set to plaintext length on success
- * @returns               palloc'd plaintext buffer, or NULL on DEK miss
- */
-char *
-tde_iam_decrypt_key(Oid idx_oid, const char* dek, int dek_len,
-                    const char *ciphertext, Size ciphertext_len, Size *out_len)
-{
-    EVP_CIPHER_CTX *ctx;
-    char           *out_buf;
-    int             olen1 = 0,
-                    olen2 = 0;
-
-    Assert(ciphertext != NULL);
-    Assert(out_len != NULL);
-
-    if (ciphertext_len <= TDE_SIV_OVERHEAD)
-        ereport(ERROR,
-                (errmsg("[IAM] Ciphertext too short for AES-SIV decryption")));
-
-    out_buf = (char *) palloc0(ciphertext_len);
-    ctx = tde_iam_ctx_prepare(&idx_dec, idx_oid, (const unsigned char *) dek, dek_len, 0);
-
-    /*
-     * The first TDE_SIV_OVERHEAD bytes are the SIV tag; provide it via SET_TAG
-     * before Update.  DecryptFinal returns <= 0 on auth failure (tampered key
-     * or wrong DEK) — treated as a hard error.
-     */
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG,
-                            TDE_SIV_OVERHEAD, (void *) ciphertext) != 1 ||
-        EVP_DecryptUpdate(ctx, (unsigned char *) out_buf, &olen1,
-                          (const unsigned char *) ciphertext + TDE_SIV_OVERHEAD,
-                          (int)(ciphertext_len - TDE_SIV_OVERHEAD)) != 1 ||
-        EVP_DecryptFinal_ex(ctx,
-                            (unsigned char *) out_buf + olen1, &olen2) != 1)
-    {
-        OPENSSL_cleanse(out_buf, ciphertext_len);
-        pfree(out_buf);
-        tde_iam_ctx_drop(&idx_dec);
-        ereport(ERROR,
-                (errcode(ERRCODE_DATA_CORRUPTED),
-                 errmsg("[IAM] AES-256-SIV authentication/decryption failed: "
-                        "index key integrity violation or wrong DEK")));
-    }
-
-    *out_len = (Size)(olen1 + olen2);
     return out_buf;
 }
 

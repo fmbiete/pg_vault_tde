@@ -21,8 +21,8 @@
  * relation ALSO uses the pg_vault_tde Table AM.  PostgreSQL creates TOAST
  * tables via heap_create_with_catalog; we hook this via the
  * relation_set_new_filelocator TAM callback to set the correct AM Oid before
- * the first write.  When TOAST chunks are inserted into the TOAST table they
- * pass through our tuple_insert hook, which calls tde_toast_encrypt_chunk.
+ * the first write.  TOAST chunks are then ordinary tuples of an encrypted_heap
+ * relation: they are encrypted by the same tuple path as any other tuple.
  *
  * This approach means:
  *  - TOAST chunk encryption is transparent: no changes to query planner.
@@ -53,66 +53,6 @@
 #include "src/include/pg_vault_tde_toast.h"
 #include "src/include/pg_vault_tde_guc.h"      /* pg_vault_tde_toast_custom_rmgr */
 #include "src/include/pg_vault_tde_rmgr.h"     /* tde_toast_wal_insert */
-/*
- * tde_toast_encrypt_chunk
- *
- * Encrypts one raw TOAST chunk (up to TDE_TOAST_CHUNK_SIZE bytes) using
- * AES-256-GCM.  Called from the TAM tuple_insert hook when inserting into a
- * TOAST table that has been assigned the pg_vault_tde AM.
- *
- * Each chunk gets a fresh random IV (generated inside tde_gcm_encrypt via
- * pg_strong_random).  This is intentional: even if two chunks contain the
- * same data (unlikely after pglz/lz4, but possible for sparse data), they
- * produce different ciphertexts.
- *
- * @param chunk_data   raw TOAST chunk bytes
- * @param chunk_len    number of bytes in this chunk
- * @param out_len      set to encrypted output length
- * @returns            palloc'd encrypted buffer; caller cleans up
- */
-char *
-tde_toast_encrypt_chunk(Oid parent_relid, const char *chunk_data, Size chunk_len, Size *out_len)
-{
-    Assert(chunk_data != NULL);
-    Assert(chunk_len > 0 && chunk_len <= TOAST_MAX_CHUNK_SIZE);
-
-    /*
-     * Delegate to the shared AES-256-GCM primitive with the parent
-     * relation's DEK.  The [IV|CT|TAG|VERSION|GEN] wire format is
-     * self-contained: each chunk carries its own IV.
-     */
-    return tde_gcm_encrypt(parent_relid, chunk_data, chunk_len, out_len);
-}
-
-/*
- * tde_toast_decrypt_chunk
- *
- * Decrypts a TOAST chunk previously encrypted by tde_toast_encrypt_chunk.
- * Verifies the GCM authentication tag before returning plaintext; any
- * tampering aborts via ereport(ERROR).
- *
- * @param enc_data     [IV|CT|TAG|VERSION|GEN] encrypted chunk
- * @param enc_len      total encrypted length
- * @param out_len      set to decrypted chunk length
- * @returns            palloc'd plaintext chunk; caller cleans up
- */
-char *
-tde_toast_decrypt_chunk(Oid parent_relid, const char *enc_data, Size enc_len, Size *out_len)
-{
-    char *out;
-
-    Assert(enc_data != NULL);
-    Assert(enc_len > TDE_V4_OVERHEAD);
-
-    /* Chunk path (not the hot seq-scan): palloc the plaintext destination. */
-    out = (char *) palloc(enc_len - TDE_V4_OVERHEAD);
-    if (!tde_gcm_decrypt(parent_relid, enc_data, enc_len, out, out_len))
-    {
-        pfree(out);
-        return NULL;
-    }
-    return out;
-}
 
 /*
  * TOAST read path note:
