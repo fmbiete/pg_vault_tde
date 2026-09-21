@@ -14,7 +14,7 @@
  *     └── wraps → per-table DEK (AES-256-WRAP, RFC 3394)
  *                   └── encrypts → tuple data (AES-256-GCM, per tuple)
  *
- * SECURITY CONSTRAINTS (from copilot-instructions.md and ROADMAP.md):
+ * SECURITY CONSTRAINTS (from ROADMAP.md):
  *   1. Passphrase comes ONLY from an environment variable — never postgresql.conf.
  *      The GUC pg_vault_tde.wallet_passphrase_env holds the env var NAME.
  *   2. KEK is loaded into process memory during wallet open, then immediately

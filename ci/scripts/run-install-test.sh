@@ -409,7 +409,14 @@ dnf -y module disable postgresql 2>/dev/null || true
 # Must satisfy every BuildRequires in packaging/rpm/pg_vault_tde.spec, since
 # rpmbuild refuses to start otherwise: chrpath, plus clang and llvm-devel for
 # the LLVM bitcode targets, which postgresqlNN-devel does not pull in.
-dnf install -y -q \
+#
+# --nobest: a vendor repo may publish a -devel rebuild into AppStream before
+# the matching runtime lands in BaseOS.  Since -devel pins the runtime to an
+# exact version, the newest -devel is then uninstallable and dnf fails outright
+# rather than stepping back.  AlmaLinux 10 did this with libcurl-devel
+# 8.12.1-4.el10_2.6 against libcurl 8.12.1-4.el10_2.4.  We build against
+# whatever pair the distro can actually resolve, not against the newest tag.
+dnf install -y -q --nobest \
     perl-IPC-Run postgresql${pg}-devel postgresql${pg}-server \
     openssl-devel libcurl-devel pkgconfig gcc make rsync rpm-build \
     chrpath clang llvm-devel

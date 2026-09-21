@@ -1362,7 +1362,7 @@ tuple read and write.  The expected overhead depends on workload and row size:
 
 | Workload | Typical Overhead | Notes |
 |----------|-----------------|-------|
-| OLTP (mixed R/W, 100–500 B rows) | **< 15%** | Target budget per copilot-instructions |
+| OLTP (mixed R/W, 100–500 B rows) | **< 15%** | Design target for this workload |
 | Bulk INSERT (1M rows) | **25–40%** | AES-GCM + `pg_strong_random` per tuple |
 | Sequential scan (1M rows, read-only) | **20–35%** | Decrypt + palloc copy per tuple |
 | Index scan (point lookups) | **< 5%** | Single tuple decrypt per fetch |

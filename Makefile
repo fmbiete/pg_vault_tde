@@ -26,7 +26,7 @@ endif
 # PostgreSQL version validation
 #
 # Supported range: PG 17 .. PG 19.  Update TDE_PG_MAX when adding a new
-# major version (see .github/copilot-instructions.md § 0.5).
+# major version.
 # ---------------------------------------------------------------------------
 TDE_PG_MIN := 17
 TDE_PG_MAX := 19
@@ -106,7 +106,7 @@ dist:
 # append to PGXS defaults rather than being overwritten by them.
 #
 # OpenSSL 3.x and libcurl are required. pkg-config locates them.
-# -std=c99 enforces the language standard mandated by copilot-instructions.md.
+# -std=c99 enforces the language standard.
 # -Wall -Wextra catch common PostgreSQL extension pitfalls early.
 # VERSION must be a single line with no trailing content; note that changing
 # VERSION does not force a rebuild of already-compiled .o files under plain

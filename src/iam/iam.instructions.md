@@ -117,9 +117,7 @@ When adding support for PostgreSQL N+1, audit every IAM callback:
 3. Add `#if PG_VERSION_NUM` guards where needed
 4. Verify `EVP_CIPHER_fetch(NULL, "AES-256-SIV", NULL)` still works with
    the OpenSSL version shipped by PG N+1's default platform
-5. Update the **Version-Specific API Differences** table in
-   `copilot-instructions.md` § 0.5
-6. Run `make ci-regress` against PG N+1 (test 17 covers index scan)
+5. Run `make ci-regress` against PG N+1 (test 17 covers index scan)
 
 ### Known Version Differences (IAM)
 
