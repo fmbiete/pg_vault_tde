@@ -1666,7 +1666,3 @@ This extension follows PostgreSQL's BSD-derived coding style and
 - Clean IV + DEK memory with `OPENSSL_cleanse` before `pfree`
 - Not introduce circular module dependencies (TAM → Crypto → KMS; never reverse)
 - Not use GPL/AGPL libraries (breaks PostgreSQL License compatibility)
-
-See [`.github/copilot-instructions.md`](.github/copilot-instructions.md)
-and [`AGENTS.md`](AGENTS.md) for AI-assisted development guidelines and
-subagent coordination protocol.

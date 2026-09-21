@@ -126,9 +126,7 @@ external storage → multiple chunks → encrypt + decrypt → round-trip check)
 ### Read Path Contract
 
 Every read callback that populates a `TupleTableSlot` with buffer-backed
-data MUST call `pg_vault_tde_decode_slot()`. The 7 callbacks that require
-this are listed in the [copilot-instructions.md](/.github/copilot-instructions.md)
-Section 3 table.
+data MUST call `pg_vault_tde_decode_slot()`.
 
 ---
 
@@ -196,9 +194,7 @@ When adding support for PostgreSQL N+1, audit every TAM callback:
 1. **Diff `tableam.h`** between PG N and PG N+1
 2. Check each callback signature in the `TableAmRoutine` struct
 3. Add `#if PG_VERSION_NUM >= (N+1)*10000` guards where needed
-4. Update the **Version-Specific API Differences** table in
-   `copilot-instructions.md` § 0.5
-5. Run `make ci-regress` against PG N+1
+4. Run `make ci-regress` against PG N+1
 
 ### Known Version Differences (TAM)
 

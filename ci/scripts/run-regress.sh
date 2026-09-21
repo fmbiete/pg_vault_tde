@@ -80,29 +80,20 @@ if ! container_psql "$CONTAINER" -f /tmp/regression_test.sql; then
 fi
 log_ok "v1.4 baseline: ALL 52 TESTS PASSED ($(timer_fmt "$(timer_elapsed "$START")"))"
 
-# ── Phase 2: Ensure extension is at v1.5 before running v1.5 TDD tests ─────────
-# The container's CREATE EXTENSION defaults to whatever pg_vault_tde.control
-# declares as default_version (1.7 since v1.7 release).  PostgreSQL refuses
-# downgrades, so we only issue an UPDATE if the live version is < 1.5.
-log_info "Ensuring pg_vault_tde >= 1.5 (skip UPDATE if already >= 1.5) ..."
+# ── Version guard ─────────────────────────────────────────────────────────
+# Only pg_vault_tde--1.7.sql is shipped (DATA in the Makefile) and the .control
+# declares default_version = 1.7, so CREATE EXTENSION lands on 1.7 and there is
+# no upgrade chain to walk. This asserts that instead of pretending to walk one.
+#
 LIVE_VERSION=$(container_psql "$CONTAINER" -tAc \
     "SELECT extversion FROM pg_extension WHERE extname='pg_vault_tde';")
-case "$LIVE_VERSION" in
-    1.0|1.1|1.2|1.3|1.4)
-        if ! container_psql "$CONTAINER" -v ON_ERROR_STOP=1 -c \
-                "ALTER EXTENSION pg_vault_tde UPDATE TO '1.5';"; then
-            log_error "REGRESSION: pg_vault_tde ${LIVE_VERSION}→1.5 upgrade FAILED"
-            $RT logs "$CONTAINER" --tail 50 2>/dev/null || true
-            exit 2
-        fi
-        log_ok "pg_vault_tde upgraded ${LIVE_VERSION} → 1.5"
-        ;;
-    *)
-        log_ok "pg_vault_tde already at ${LIVE_VERSION} (>= 1.5); skipping UPDATE"
-        ;;
-esac
+if [ "$LIVE_VERSION" != "1.7" ]; then
+    log_error "REGRESSION: expected pg_vault_tde 1.7, found '${LIVE_VERSION}'"
+    exit 2
+fi
+log_ok "pg_vault_tde at ${LIVE_VERSION}"
 
-# ── Phase 3: v1.5 TDD tests (20 tests, numbers 53-72) ───────────────────
+# ── Phase 2: v1.5 TDD tests (20 tests, numbers 53-72) ───────────────────
 log_info "Running v1.5 TDD regression_test_v15.sql (tests 53-72) ..."
 START=$(timer_start)
 if container_psql "$CONTAINER" -f /tmp/regression_test_v15.sql; then
@@ -115,40 +106,7 @@ else
     exit 2
 fi
 
-# ── Phase 4: Ensure extension is at v1.7 before running v1.6 wallet tests ─────
-log_info "Ensuring pg_vault_tde = 1.7 (upgrade chain 1.5→1.6→1.7 if needed) ..."
-LIVE_VERSION=$(container_psql "$CONTAINER" -tAc \
-    "SELECT extversion FROM pg_extension WHERE extname='pg_vault_tde';")
-case "$LIVE_VERSION" in
-    1.5)
-        if ! container_psql "$CONTAINER" -v ON_ERROR_STOP=1 -c \
-                "ALTER EXTENSION pg_vault_tde UPDATE TO '1.6';
-                 ALTER EXTENSION pg_vault_tde UPDATE TO '1.7';"; then
-            log_error "REGRESSION: pg_vault_tde 1.5→1.6→1.7 upgrade FAILED"
-            $RT logs "$CONTAINER" --tail 50 2>/dev/null || true
-            exit 2
-        fi
-        log_ok "pg_vault_tde upgraded 1.5 → 1.6 → 1.7"
-        ;;
-    1.6)
-        if ! container_psql "$CONTAINER" -v ON_ERROR_STOP=1 -c \
-                "ALTER EXTENSION pg_vault_tde UPDATE TO '1.7';"; then
-            log_error "REGRESSION: pg_vault_tde 1.6→1.7 upgrade FAILED"
-            $RT logs "$CONTAINER" --tail 50 2>/dev/null || true
-            exit 2
-        fi
-        log_ok "pg_vault_tde upgraded 1.6 → 1.7"
-        ;;
-    1.7)
-        log_ok "pg_vault_tde already at 1.7; skipping UPDATE"
-        ;;
-    *)
-        log_error "REGRESSION: unexpected live version '${LIVE_VERSION}' before v1.7 phase"
-        exit 2
-        ;;
-esac
-
-# ── Phase 5: v1.6 wallet tests (tests 73-109) ────────────────────────────
+# ── Phase 3: v1.6 wallet tests (tests 73-109) ────────────────────────────
 log_info "Running v1.6 wallet regression_test_v16.sql (tests 73-109) ..."
 START=$(timer_start)
 if container_psql "$CONTAINER" -f /tmp/regression_test_v16.sql; then
@@ -161,7 +119,7 @@ else
     exit 2
 fi
 
-# ── Phase 6: v1.7 wallet tests (tests 111-140) ────────────────────────────
+# ── Phase 4: v1.7 wallet tests (tests 111-140) ────────────────────────────
 log_info "Running v1.7 wallet regression_test_v17.sql (tests 111-140) ..."
 START=$(timer_start)
 if container_psql "$CONTAINER" -f /tmp/regression_test_v17.sql; then
