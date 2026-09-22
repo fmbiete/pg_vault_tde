@@ -249,7 +249,7 @@ Datum tde_iam_ope_bytea_cmp(PG_FUNCTION_ARGS)
 	bytea *a = PG_GETARG_BYTEA_PP(0);
 	bytea *b = PG_GETARG_BYTEA_PP(1);
 
-	/* Extract direct pointers to the serialized OreSerializedPayload structures */
+	/* Extract direct pointers to the serialized OpeSerializedPayload structures */
 	const char *ctxt_a = (const char *)VARDATA_ANY(a);
 	const char *ctxt_b = (const char *)VARDATA_ANY(b);
 
@@ -262,7 +262,7 @@ Datum tde_iam_ope_bytea_cmp(PG_FUNCTION_ARGS)
 	 * Safety Guard: If either index token is corrupted, empty, or missing
 	 * its payload structure header, fall back to comparing raw data sizes.
 	 */
-	if (len_a < sizeof(OreSerializedPayload) || len_b < sizeof(OreSerializedPayload))
+	if (len_a < sizeof(OpeSerializedPayload) || len_b < sizeof(OpeSerializedPayload))
 	{
 		PG_RETURN_INT32(len_a - len_b);
 	}

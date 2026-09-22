@@ -265,7 +265,7 @@ SELECT email, ssn FROM users WHERE id = 1;
 | Tuple user data | ✅ **Yes** — AES-256-GCM | All column values in `encrypted_heap` tables |
 | HeapTupleHeader | ✗ No | xmin, xmax, ctid, infomask — required for MVCC |
 | Index keys (B-Tree) | ⚠️ Optional — `tde_btree` | AES-256-SIV — equality only; all types encrypted (v1.7); index-only scans not supported |
-| Index keys (B-Tree) | ⚠️ Optional — `tde_ope_btree` | Order Preserving Encryption based in AES-256-ECB — all types encrypted (v1.8); index-only scans and non-equality supported |
+| Index keys (B-Tree) | ⚠️ Optional — `tde_ope_btree` | Order Preserving Encryption based in AES-256-ECB — all types encrypted (v1.8); index-only scans and non-equality supported; maximum index prefix 2048 bytes |
 | Index keys (GIN, Hash) | 🔜 v1.8 | GIN for jsonb/arrays; Hash for equality hashing |
 | Index keys (GiST equality) | 🔜 v1.8 | Equality-only GiST (`inet_ops`); range/geometric GiST permanently deferred |
 | Index keys (BRIN bloom) | 🔜 v1.8 | Equality-only block-range pruning via a bloom filter over ciphertext hashes; `minmax` BRIN permanently deferred (needs a spike — see doc/ROADMAP.md) |
@@ -315,7 +315,7 @@ Index Access Method (IAM) — tde_btree                  src/iam/
 Index Access Method (IAM) — tde_ope_btree              src/iam/
    |  Order Preserving Encryption (OPE)
    │  AES-256-ECB — stateless, deterministic monotone masking
-   │  128-bit big-endian multi-precision carry arithmetic
+   |  Maximum prefix length: 2048 bytes
 
    ▼
 Crypto Layer — AES-256-GCM (OpenSSL 3.x EVP)           src/crypto/

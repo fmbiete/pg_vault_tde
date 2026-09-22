@@ -11,10 +11,12 @@
 #include "postgres.h"
 #include <openssl/evp.h>
 
-typedef struct
+#define OPE_MAX_LEN 2048
+
+typedef struct OpeSerializedPayload
 {
-	unsigned char ope_ciphertext[16];
-} OreSerializedPayload;
+	unsigned char ope_ciphertext[OPE_MAX_LEN];
+} OpeSerializedPayload;
 
 /* Lifecycle Hook Declarations */
 void tde_crypto_ope_ctx_init(void);
