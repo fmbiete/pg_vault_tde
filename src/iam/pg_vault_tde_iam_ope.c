@@ -28,6 +28,7 @@
 #include "catalog/pg_am_d.h"    /* BTREE_AM_OID */
 #include "storage/lwlock.h"
 
+#include <openssl/crypto.h>
 
 #include "src/include/pg_vault_tde_catalog.h"
 #include "src/include/pg_vault_tde_iam_ope.h"
@@ -68,27 +69,45 @@ tde_iam_ope_serialize_fixed_type(Datum datum, Oid typoid, uint8 *buf)
 	switch (typoid)
 	{
 	case INT4OID:
+	{
+		uint32 v = (uint32)DatumGetInt32(datum) ^ 0x80000000;
+		v = pg_hton32(v);
+		memcpy(buf, &v, 4);
+		return 4;
+	}
+	break;
 	case DATEOID:
 	{
 		uint32 v = pg_hton32((uint32)DatumGetInt32(datum));
 		memcpy(buf, &v, 4);
 		return 4;
 	}
+	break;
 	case INT8OID:
+	{
+		uint64 v = (uint64)DatumGetInt64(datum) ^ 0x8000000000000000ULL;
+		v = pg_hton64(v);
+		memcpy(buf, &v, 8);
+		return 8;
+	}
+	break;
 	case TIMESTAMPTZOID:
 	{
 		uint64 v = pg_hton64((uint64)DatumGetInt64(datum));
 		memcpy(buf, &v, 8);
 		return 8;
 	}
+	break;
 	case UUIDOID:
 	{
 		pg_uuid_t *uid = DatumGetUUIDP(datum);
 		memcpy(buf, uid->data, 16);
 		return 16;
 	}
+	break;
 	default:
 		return 0;
+		break;
 	}
 }
 
@@ -128,7 +147,8 @@ tde_iam_ope_encrypt_fixed_type_datum(Relation index_rel, Datum datum, Oid typoid
 	PG_TRY();
 	{
 		encrypted = tde_crypto_ope_encrypt((const char *)dek, sizeof(dek),
-										   (const char *)plain_buf, plain_len, &enc_len);
+										   (const char *)plain_buf, plain_len, true,
+										   &enc_len);
 		OPENSSL_cleanse(plain_buf, sizeof(plain_buf));
 
         enc_bytea = (bytea *) palloc(VARHDRSZ + enc_len);
@@ -195,7 +215,8 @@ tde_iam_ope_encrypt_index_datum(Relation index_rel, Datum datum, bool typbyval, 
 		PG_TRY();
 		{
 			encrypted = tde_crypto_ope_encrypt((const char *)dek, sizeof(dek),
-											   plain, plen, &enc_len);
+											   plain, plen, false,
+											   &enc_len);
 
 			enc_bytea = (bytea *) palloc(VARHDRSZ + enc_len);
 			SET_VARSIZE(enc_bytea, VARHDRSZ + enc_len);
@@ -249,7 +270,7 @@ Datum tde_iam_ope_bytea_cmp(PG_FUNCTION_ARGS)
 	bytea *a = PG_GETARG_BYTEA_PP(0);
 	bytea *b = PG_GETARG_BYTEA_PP(1);
 
-	/* Extract direct pointers to the serialized OpeSerializedPayload structures */
+	/* Extract direct pointers to the serialized OpeDynamicPayload structures */
 	const char *ctxt_a = (const char *)VARDATA_ANY(a);
 	const char *ctxt_b = (const char *)VARDATA_ANY(b);
 
@@ -262,7 +283,7 @@ Datum tde_iam_ope_bytea_cmp(PG_FUNCTION_ARGS)
 	 * Safety Guard: If either index token is corrupted, empty, or missing
 	 * its payload structure header, fall back to comparing raw data sizes.
 	 */
-	if (len_a < sizeof(OpeSerializedPayload) || len_b < sizeof(OpeSerializedPayload))
+	if (len_a < sizeof(OpeDynamicPayload) || len_b < sizeof(OpeDynamicPayload))
 	{
 		PG_RETURN_INT32(len_a - len_b);
 	}

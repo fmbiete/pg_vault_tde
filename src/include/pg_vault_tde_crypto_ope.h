@@ -9,21 +9,23 @@
 #define PG_VAULT_TDE_CRYPTO_OPE_H
 
 #include "postgres.h"
-#include <openssl/evp.h>
 
-#define OPE_MAX_LEN 2048
-
-typedef struct OpeSerializedPayload
+/*
+ * The payload is prefixed with its actual dynamic length.
+ * The ciphertext bytes immediately follow it in memory.
+ */
+typedef struct OpeDynamicPayload
 {
-	unsigned char ope_ciphertext[OPE_MAX_LEN];
-} OpeSerializedPayload;
+	uint32_t len; /* Actual length of the ciphertext array */
+	unsigned char ciphertext[FLEXIBLE_ARRAY_MEMBER];
+} OpeDynamicPayload;
 
-/* Lifecycle Hook Declarations */
 void tde_crypto_ope_ctx_init(void);
 void tde_crypto_ope_ctx_cleanup(void);
 
 char *tde_crypto_ope_encrypt(const char *dek, int dek_len,
-							 const char *plaintext, Size plaintext_len, Size *out_len);
+							 const char *plaintext, Size plaintext_len, bool is_fixed_type,
+							 Size *out_len);
 
 int tde_crypto_ope_compare(const char *ctxt1, const char *ctxt2);
 
