@@ -173,6 +173,19 @@ tde_crypto_ope_encrypt(const char *dek, int dek_len,
 		memcpy(encrypt_slot.cached_key, prf_master_key, 32);
 		encrypt_slot.is_valid = true;
 	}
+	else 
+	{
+		/*
+ 		 * Reset the existing context's internal block state and buffers.
+ 		 * Reuses the cached key schedule without triggering a costly key setup.
+ 		 */
+		if (EVP_EncryptInit_ex(encrypt_slot.ctx, NULL, NULL, NULL, NULL) != 1)
+		{
+			tde_crypto_ope_ctx_cleanup();
+			pfree(payload);
+			elog(ERROR, "[CRYPTO-OPE] Cipher context reset failure");
+		}
+	}
 
 	/*
 	 * 4. Generate a deterministic, pseudo-random noise stream up to 2048 bytes.
