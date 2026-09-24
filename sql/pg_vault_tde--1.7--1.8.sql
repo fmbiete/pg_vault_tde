@@ -10,7 +10,7 @@
 -- ============================================================================
 CREATE FUNCTION pg_vault_tde_iam_ope_handler(internal)
     RETURNS index_am_handler
-    LANGUAGE C STRICT
+    LANGUAGE C STRICT PARALLEL SAFE
     AS 'MODULE_PATHNAME', 'pg_vault_tde_iam_ope_handler';
 
 
@@ -30,7 +30,7 @@ COMMENT ON ACCESS METHOD tde_ope_btree IS
 -- ============================================================================
 CREATE FUNCTION tde_ope_bytea_cmp(bytea, bytea)
     RETURNS integer
-    LANGUAGE C STRICT IMMUTABLE
+    LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE
     AS 'MODULE_PATHNAME', 'tde_iam_ope_bytea_cmp';
 
 COMMENT ON FUNCTION tde_ope_bytea_cmp(bytea, bytea) IS
@@ -51,35 +51,35 @@ AS
 
 -- Per-type SQL wrappers for support function 1 on fixed types
 CREATE FUNCTION tde_ope_text_cmp(text, text)
-    RETURNS integer LANGUAGE C STRICT IMMUTABLE
+    RETURNS integer LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE
     AS 'MODULE_PATHNAME', 'tde_iam_ope_text_cmp';
 
 CREATE FUNCTION tde_ope_int4_cmp(int4, int4)
-    RETURNS integer LANGUAGE C STRICT IMMUTABLE
+    RETURNS integer LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE
     AS 'MODULE_PATHNAME', 'tde_iam_ope_int4_cmp';
 
 CREATE FUNCTION tde_ope_int8_cmp(int8, int8)
-    RETURNS integer LANGUAGE C STRICT IMMUTABLE
+    RETURNS integer LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE
     AS 'MODULE_PATHNAME', 'tde_iam_ope_int8_cmp';
 
 CREATE FUNCTION tde_ope_uuid_cmp(uuid, uuid)
-    RETURNS integer LANGUAGE C STRICT IMMUTABLE
+    RETURNS integer LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE
     AS 'MODULE_PATHNAME', 'tde_iam_ope_uuid_cmp';
 
 CREATE FUNCTION tde_ope_date_cmp(date, date)
-    RETURNS integer LANGUAGE C STRICT IMMUTABLE
+    RETURNS integer LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE
     AS 'MODULE_PATHNAME', 'tde_iam_ope_date_cmp';
 
 CREATE FUNCTION tde_ope_timestamptz_cmp(timestamptz, timestamptz)
-    RETURNS integer LANGUAGE C STRICT IMMUTABLE
+    RETURNS integer LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE
     AS 'MODULE_PATHNAME', 'tde_iam_ope_timestamptz_cmp';
 
 CREATE FUNCTION tde_ope_bpchar_cmp(bpchar, bpchar)
-    RETURNS integer LANGUAGE C STRICT IMMUTABLE
+    RETURNS integer LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE
     AS 'MODULE_PATHNAME', 'tde_iam_ope_text_cmp'; -- Reuse text comparison logic
 
 CREATE FUNCTION tde_ope_varchar_cmp(varchar, varchar)
-    RETURNS integer LANGUAGE C STRICT IMMUTABLE
+    RETURNS integer LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE
     AS 'MODULE_PATHNAME', 'tde_iam_ope_text_cmp'; -- Reuse text comparison logic
 
 CREATE OPERATOR FAMILY tde_ope_enc_ops_family USING tde_ope_btree;
@@ -203,5 +203,3 @@ AS
     OPERATOR 5  >  (varchar, varchar),
     FUNCTION 1 tde_ope_varchar_cmp(varchar, varchar),
     STORAGE bytea;
-
-
