@@ -714,9 +714,11 @@ BEGIN
     SELECT count(*) INTO cidx FROM tde_cic_157 WHERE id BETWEEN 1 AND 1000;
     
     SET enable_seqscan = on;
+	SET enable_indexscan = off;
     SET enable_bitmapscan = off;
     SELECT count(*) INTO cseq FROM tde_cic_157 WHERE id BETWEEN 1 AND 1000;
     RESET enable_seqscan;
+	RESET enable_indexscan;
     RESET enable_bitmapscan;
     
     IF cidx <> cseq OR cidx <> 1000 THEN
@@ -973,6 +975,296 @@ BEGIN
 END;
 $$;
 
+-- ================================================================
+-- TEST 164: Explicit Short-String Prefix Edge Case ("B" vs "Alice")
+--
+-- Validates the exact scenario where a 1-character string value ('B') 
+-- has a higher alphabetical character weight than the first character 
+-- of a longer string ('Alice'). With proper null-termination padding (+1 len), 
+-- the index scan must accurately sort 'B' after 'Alice'.
+-- ================================================================
+DO $$
+DECLARE
+    result_vals text[];
+    expected    text[] := ARRAY['Alice', 'B'];
+    i           int;
+BEGIN
+    DROP TABLE IF EXISTS tde_ope_short_prefix_164;
+    CREATE TABLE tde_ope_short_prefix_164 (name text) USING encrypted_heap;
+    CREATE INDEX tde_ope_short_idx_164          
+        ON tde_ope_short_prefix_164 USING tde_ope_btree (name tde_ope_text_enc_ops);
+    
+    INSERT INTO tde_ope_short_prefix_164 VALUES ('B'), ('Alice');
+    
+    SET enable_seqscan = off;
+    SET enable_bitmapscan = off;
+    SELECT array_agg(name ORDER BY name ASC) INTO result_vals
+        FROM tde_ope_short_prefix_164;
+    RESET enable_seqscan;
+    RESET enable_bitmapscan;
+    
+    FOR i IN 1..array_length(expected, 1) LOOP
+        IF result_vals[i] IS DISTINCT FROM expected[i] THEN
+            RAISE EXCEPTION 'TEST 164 FAILED: Short prefix weight sorting failed at position %. Got "%", expected "%" (Null-terminator missing in OPE engine stream boundary)',
+                i, result_vals[i], expected[i];
+        END IF;
+    END LOOP;
+    
+    DROP TABLE tde_ope_short_prefix_164;
+    RAISE NOTICE 'TEST 164 PASSED: OPE string boundary handling for "B" vs "Alice" verified.'; 
+END; 
+$$;
+
+-- ================================================================
+-- TEST 165: Multi-Length String Matrix Sorting Stability
+--
+-- Exercises the index using a mix of single-character codes and full 
+-- names sharing identical prefixes to ensure length metrics don't bias 
+-- the OPE order-preserving ciphertext transformations.
+-- ================================================================
+DO $$
+DECLARE
+    result_vals text[];
+    expected    text[] := ARRAY['A', 'Alf', 'Alice', 'B', 'Bob', 'C', 'Charlie'];
+    i           int;
+BEGIN
+    DROP TABLE IF EXISTS tde_ope_matrix_165;
+    CREATE TABLE tde_ope_matrix_165 (name text) USING encrypted_heap;
+    CREATE INDEX tde_ope_matrix_idx_165          
+        ON tde_ope_matrix_165 USING tde_ope_btree (name tde_ope_text_enc_ops);
+    
+    INSERT INTO tde_ope_matrix_165 VALUES 
+        ('Charlie'), ('A'), ('Bob'), ('Alice'), ('C'), ('Alf'), ('B');
+        
+    SET enable_seqscan = off;
+    SET enable_bitmapscan = off;
+    SELECT array_agg(name ORDER BY name ASC) INTO result_vals
+        FROM tde_ope_matrix_165;
+    RESET enable_seqscan;
+    RESET enable_bitmapscan;
+    
+    FOR i IN 1..array_length(expected, 1) LOOP
+        IF result_vals[i] IS DISTINCT FROM expected[i] THEN
+            RAISE EXCEPTION 'TEST 165 FAILED: Dictionary matrix mismatch at pos %. Got "%", expected "%"',
+                i, result_vals[i], expected[i];
+        END IF;
+    END LOOP;
+    
+    DROP TABLE tde_ope_matrix_165;
+    RAISE NOTICE 'TEST 165 PASSED: Multi-length string matrix sorted cleanly via tde_ope_btree index scan.'; 
+END; 
+$$;
+
+-- ================================================================
+-- TEST 166: Fixed-Width Character Padding Stability (bpchar / char(n))
+--
+-- In PostgreSQL, char(n) blank-pads values with trailing spaces only on disk. 
+-- For instance, 'A' stored in a char(5) field becomes 'A    ', but it's read as 'A' 
+-- This test ensures that the OPE engine accurately tracks these space 
+-- pads as part of its sort evaluations rather than stopping at the raw string boundaries.
+-- ================================================================
+DO $$
+DECLARE
+    result_vals text[];
+    expected    text[] := ARRAY['A', 'A', 'A a', 'B'];
+    i           int;
+BEGIN
+    DROP TABLE IF EXISTS tde_ope_fixed_width_166;
+    -- Using char(5) forces trailing space blank-padding behavior
+    CREATE TABLE tde_ope_fixed_width_166 (val char(5)) USING encrypted_heap;
+    CREATE INDEX tde_ope_fixed_idx_166          
+        ON tde_ope_fixed_width_166 USING tde_ope_btree (val tde_ope_bpchar_enc_ops);
+    
+    -- Insert elements that test trailing space priority rules
+    -- Standard text ordering: 'A' (padded to 'A    ') < 'A a  ' < 'A  b ' < 'B    '
+    INSERT INTO tde_ope_fixed_width_166 VALUES ('B'), ('A  '), ('A a'), ('A');
+    
+    SET enable_seqscan = off;
+    SET enable_bitmapscan = off;
+    -- rtrim ensures comparison validation checks matching values cleanly
+    SELECT array_agg(rtrim(val) ORDER BY val ASC) INTO result_vals
+        FROM tde_ope_fixed_width_166;
+    RESET enable_seqscan;
+    RESET enable_bitmapscan;
+    
+    FOR i IN 1..array_length(expected, 1) LOOP
+        IF result_vals[i] IS DISTINCT FROM expected[i] THEN
+            RAISE EXCEPTION 'TEST 166 FAILED: Fixed-width blank padding sort failed at pos %. Got "%", expected "%"',
+                i, result_vals[i], expected[i];
+        END IF;
+    END LOOP;
+    
+    DROP TABLE tde_ope_fixed_width_166;
+    RAISE NOTICE 'TEST 166 PASSED: OPE blank-padded fixed-width spaces evaluated correctly.'; 
+END; 
+$$;
+
+-- ================================================================
+-- TEST 167: Bytea Array Sequencing and Internal Null Bytes (\0)
+--
+-- Binary fields (bytea) can store raw streams containing arbitrary null 
+-- bytes anywhere in the sequence. Unlike string workflows, a null byte 
+-- inside a bytea sequence must NOT act as an early end-of-string terminator. 
+-- The test validates that the correct plen boundary evaluates everything.
+-- ================================================================
+DO $$
+DECLARE
+    result_bytes bytea[];
+    expected     bytea[] := ARRAY[
+        decode('010002', 'hex'), -- \x010002
+        decode('010003', 'hex'), -- \x010003
+        decode('0101', 'hex'),   -- \x0101
+        decode('0200', 'hex')    -- \x0200
+    ];
+    i            int;
+BEGIN
+    DROP TABLE IF EXISTS tde_ope_bytea_167;
+    CREATE TABLE tde_ope_bytea_167 (raw_data bytea) USING encrypted_heap;
+    -- Using the generic tde_ope_btree index on bytea column
+    CREATE INDEX tde_ope_bytea_idx_167          
+        ON tde_ope_bytea_167 USING tde_ope_btree (raw_data);
+    
+    -- Insert binary arrays with varying lengths and embedded zeros
+    INSERT INTO tde_ope_bytea_167 VALUES 
+        (decode('0200', 'hex')),
+        (decode('010003', 'hex')),
+        (decode('0101', 'hex')),
+        (decode('010002', 'hex'));
+        
+    SET enable_seqscan = off;
+    SET enable_bitmapscan = off;
+    SELECT array_agg(raw_data ORDER BY raw_data ASC) INTO result_bytes
+        FROM tde_ope_bytea_167;
+    RESET enable_seqscan;
+    RESET enable_bitmapscan;
+    
+    FOR i IN 1..array_length(expected, 1) LOOP
+        IF result_bytes[i] IS DISTINCT FROM expected[i] THEN
+            RAISE EXCEPTION 'TEST 167 FAILED: Bytea array sequence failed at position %. Got %, expected % (Internal null byte incorrectly truncated validation path)',
+                i, encode(result_bytes[i], 'hex'), encode(expected[i], 'hex');
+        END IF;
+    END LOOP;
+    
+    DROP TABLE tde_ope_bytea_167;
+    RAISE NOTICE 'TEST 167 PASSED: OPE bytea internal null bytes and sizes processed correctly.'; 
+END; 
+$$;
+
+-- ================================================================
+-- TEST 168: TOAST Storage Layer Boundary (Large Strings > 4KB)
+--
+-- Validates that large payload values which trigger PostgreSQL's internal
+-- TOAST table compression mechanics do not crash or corrupt the length-prefix 
+-- validation calculations within the OPE index engine.
+-- ================================================================
+DO $$
+DECLARE
+    large_val   text := repeat('X', 5000); -- Forces the value to go to TOAST
+    result_val  text;
+BEGIN
+    DROP TABLE IF EXISTS tde_ope_toast_168;
+    CREATE TABLE tde_ope_toast_168 (id int, payload text) USING encrypted_heap;
+    CREATE INDEX tde_ope_toast_idx_168 
+        ON tde_ope_toast_168 USING tde_ope_btree (payload tde_ope_text_enc_ops);
+        
+    INSERT INTO tde_ope_toast_168 VALUES (1, large_val), (2, 'short_string');
+    
+    SET enable_seqscan = off;
+    SELECT payload INTO result_val FROM tde_ope_toast_168 WHERE payload = large_val;
+    RESET enable_seqscan;
+    
+    IF length(result_val) <> 5000 THEN
+        RAISE EXCEPTION 'TEST 168 FAILED: TOASTed text value corruption or truncation detected.';
+    END IF;
+    
+    DROP TABLE tde_ope_toast_168;
+    RAISE NOTICE 'TEST 168 PASSED: Large TOASTed values safely processed by OPE index engine.';
+END;
+$$;
+
+-- ================================================================
+-- TEST 169: Empty String Boundary Condition ("" vs " ")
+--
+-- Validates the extreme lower bound of the string length metric. 
+-- An empty string has a strlen of 0, meaning the length-prefix 
+-- fix reduces it to a 1-byte payload containing exactly '\0'. 
+-- This test ensures that the OPE engine successfully handles a 
+-- 1-byte encryption payload containing zero without out-of-bounds 
+-- read crashes, and accurately sorts it before a whitespace block.
+-- ================================================================
+DO $$
+DECLARE
+    result_vals text[];
+    expected    text[] := ARRAY['', ' '];
+    i           int;
+BEGIN
+    DROP TABLE IF EXISTS tde_ope_empty_169;
+    CREATE TABLE tde_ope_empty_169 (val text) USING encrypted_heap;
+    CREATE INDEX tde_ope_empty_idx_169 
+        ON tde_ope_empty_169 USING tde_ope_btree (val tde_ope_text_enc_ops);
+        
+    INSERT INTO tde_ope_empty_169 VALUES (' '), ('');
+    
+    SET enable_seqscan = off;
+    SET enable_bitmapscan = off;
+    SELECT array_agg(val ORDER BY val ASC) INTO result_vals
+        FROM tde_ope_empty_169;
+    RESET enable_seqscan;
+    RESET enable_bitmapscan;
+    
+    FOR i IN 1..array_length(expected, 1) LOOP
+        IF result_vals[i] IS DISTINCT FROM expected[i] THEN
+            RAISE EXCEPTION 'TEST 169 FAILED: Empty string boundary sorting failed at pos %. Got "%", expected "%"',
+                i, result_vals[i], expected[i];
+        END IF;
+    END LOOP;
+    
+    DROP TABLE tde_ope_empty_169;
+    RAISE NOTICE 'TEST 169 PASSED: Empty string absolute boundary condition isolated and verified.';
+END;
+$$;
+
+-- ================================================================
+-- TEST 170: Multi-Byte Character Encodings (UTF-8 / International Text)
+--
+-- Validates that multi-byte UTF-8 character sequences (where characters 
+-- take between 2 to 4 bytes instead of 1) preserve canonical binary 
+-- sort ordering. It checks that the OPE engine maps these expanded variable 
+-- byte streams into sequential ciphertext slots without corrupting 
+-- multi-byte character sorting boundaries.
+-- ================================================================
+DO $$
+DECLARE
+    result_vals text[];
+    expected    text[] := ARRAY['Apple', 'Ávila', 'Banana'];
+    i           int;
+BEGIN
+    DROP TABLE IF EXISTS tde_ope_multibyte_170;
+    CREATE TABLE tde_ope_multibyte_170 (val text) USING encrypted_heap;
+    CREATE INDEX tde_ope_mbyte_idx_170 
+        ON tde_ope_multibyte_170 USING tde_ope_btree (val tde_ope_text_enc_ops);
+        
+    INSERT INTO tde_ope_multibyte_170 VALUES ('Banana'), ('Ávila'), ('Apple');
+    
+    SET enable_seqscan = off;
+    SET enable_bitmapscan = off;
+    SELECT array_agg(val ORDER BY val ASC) INTO result_vals
+        FROM tde_ope_multibyte_170;
+    RESET enable_seqscan;
+    RESET enable_bitmapscan;
+    
+    FOR i IN 1..array_length(expected, 1) LOOP
+        IF result_vals[i] IS DISTINCT FROM expected[i] THEN
+            RAISE EXCEPTION 'TEST 170 FAILED: Multi-byte UTF-8 sequence sorting failed at pos %. Got "%", expected "%"',
+                i, result_vals[i], expected[i];
+        END IF;
+    END LOOP;
+    
+    DROP TABLE tde_ope_multibyte_170;
+    RAISE NOTICE 'TEST 170 PASSED: Multi-byte UTF-8 international text sort matrices verified.';
+END;
+$$;
+
 
 -- ================================================================
 -- PHASE SUMMARY
@@ -1008,6 +1300,13 @@ BEGIN
     RAISE NOTICE '   OPE variable prefix & alignment structures ..... test 161';
     RAISE NOTICE '   OPE NULL boundary filtering isolate scans ...... test 162';
     RAISE NOTICE '   OPE rollback isolation verification tests ...... test 163';
+	RAISE NOTICE '   Explicit Short-String Prefix Edge Case ......... test 164';
+	RAISE NOTICE '   Multi-Length String Matrix Sorting Stability ... test 165';
+	RAISE NOTICE '   Fixed-Width Character Padding Stability ........ test 166';
+	RAISE NOTICE '   Bytea Array Sequencing and Internal Null Bytes . test 167';
+	RAISE NOTICE '   TOAST Storage Layer Boundary ................... test 168';
+	RAISE NOTICE '   Empty String Boundary Condition ................ test 169';
+	RAISE NOTICE '   Multi-Byte Character Encodings ................. test 170';
     RAISE NOTICE '============================================================';
 END;
 $$;

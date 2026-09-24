@@ -11,21 +11,26 @@
 #include "postgres.h"
 
 /*
- * The payload is prefixed with its actual dynamic length.
- * The ciphertext bytes immediately follow it in memory.
+ * GNU Zero-length array adaptation inside an anonymous union.
+ * Forces payload array offset to exactly 0 bytes while remaining compiler clean.
  */
 typedef struct OpeDynamicPayload
 {
-	uint32_t len; /* Actual length of the ciphertext array */
-	unsigned char ciphertext[FLEXIBLE_ARRAY_MEMBER];
+	union
+	{
+		unsigned char first_byte;
+		unsigned char ciphertext[0];
+	};
 } OpeDynamicPayload;
 
 void tde_crypto_ope_ctx_init(void);
 void tde_crypto_ope_ctx_cleanup(void);
 
+char * bytes_to_hex_string(const char *src, int len);
+
 char *tde_crypto_ope_encrypt(const char *dek, int dek_len,
-							 const char *plaintext, Size plaintext_len, bool is_fixed_type,
-							 Size *out_len);
+								 const char *plaintext, Size plaintext_len,
+								 Size *out_len);
 
 int tde_crypto_ope_compare(const char *ctxt1, const char *ctxt2);
 

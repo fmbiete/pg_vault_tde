@@ -74,6 +74,14 @@ CREATE FUNCTION tde_ope_timestamptz_cmp(timestamptz, timestamptz)
     RETURNS integer LANGUAGE C STRICT IMMUTABLE
     AS 'MODULE_PATHNAME', 'tde_iam_ope_timestamptz_cmp';
 
+CREATE FUNCTION tde_ope_bpchar_cmp(bpchar, bpchar)
+    RETURNS integer LANGUAGE C STRICT IMMUTABLE
+    AS 'MODULE_PATHNAME', 'tde_iam_ope_text_cmp'; -- Reuse text comparison logic
+
+CREATE FUNCTION tde_ope_varchar_cmp(varchar, varchar)
+    RETURNS integer LANGUAGE C STRICT IMMUTABLE
+    AS 'MODULE_PATHNAME', 'tde_iam_ope_text_cmp'; -- Reuse text comparison logic
+
 CREATE OPERATOR FAMILY tde_ope_enc_ops_family USING tde_ope_btree;
 
 CREATE OPERATOR CLASS tde_ope_text_enc_ops
@@ -153,3 +161,47 @@ AS
     OPERATOR 5  >  (timestamptz, timestamptz),
 	FUNCTION 1 tde_ope_timestamptz_cmp(timestamptz, timestamptz),
     STORAGE bytea;
+
+-- Define the Operator Class for 'character' / 'char(n)' (Internal name: bpchar)
+CREATE OPERATOR CLASS tde_ope_bpchar_enc_ops
+    DEFAULT FOR TYPE bpchar
+    USING tde_ope_btree
+    FAMILY tde_ope_enc_ops_family
+AS
+    OPERATOR 1  <  (bpchar, bpchar),
+    OPERATOR 2  <= (bpchar, bpchar),
+    OPERATOR 3  =  (bpchar, bpchar),
+    OPERATOR 4  >= (bpchar, bpchar),
+    OPERATOR 5  >  (bpchar, bpchar),
+	FUNCTION 1 tde_ope_bpchar_cmp(bpchar, bpchar),
+    STORAGE bytea;
+
+-- 2. Define unique C-backed Boolean primitives for VARCHAR
+CREATE FUNCTION tde_ope_varchar_lt(varchar, varchar) RETURNS boolean LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'tde_iam_ope_varchar_lt';
+CREATE FUNCTION tde_ope_varchar_le(varchar, varchar) RETURNS boolean LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'tde_iam_ope_varchar_le';
+CREATE FUNCTION tde_ope_varchar_eq(varchar, varchar) RETURNS boolean LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'tde_iam_ope_varchar_eq';
+CREATE FUNCTION tde_ope_varchar_ge(varchar, varchar) RETURNS boolean LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'tde_iam_ope_varchar_ge';
+CREATE FUNCTION tde_ope_varchar_gt(varchar, varchar) RETURNS boolean LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE AS 'MODULE_PATHNAME', 'tde_iam_ope_varchar_gt';
+
+-- 3. Register the Operators explicitly for VARCHAR types
+CREATE OPERATOR = (PROCEDURE = tde_ope_varchar_eq, LEFTARG = varchar, RIGHTARG = varchar);
+CREATE OPERATOR < (PROCEDURE = tde_ope_varchar_lt, LEFTARG = varchar, RIGHTARG = varchar);
+CREATE OPERATOR <= (PROCEDURE = tde_ope_varchar_le, LEFTARG = varchar, RIGHTARG = varchar);
+CREATE OPERATOR > (PROCEDURE = tde_ope_varchar_gt, LEFTARG = varchar, RIGHTARG = varchar);
+CREATE OPERATOR >= (PROCEDURE = tde_ope_varchar_ge, LEFTARG = varchar, RIGHTARG = varchar);
+
+-- 4. Declare the VARCHAR Operator Class using the newly isolated operator tokens
+CREATE OPERATOR CLASS tde_ope_varchar_enc_ops
+    DEFAULT FOR TYPE varchar
+    USING tde_ope_btree
+    FAMILY tde_ope_enc_ops_family
+AS
+    OPERATOR 1  <  (varchar, varchar),
+    OPERATOR 2  <= (varchar, varchar),
+    OPERATOR 3  = (varchar, varchar),
+    OPERATOR 4  >= (varchar, varchar),
+    OPERATOR 5  >  (varchar, varchar),
+    FUNCTION 1 tde_ope_varchar_cmp(varchar, varchar),
+    STORAGE bytea;
+
+

@@ -20,6 +20,7 @@
 #include "access/nbtree.h"
 #include "access/tableam.h"    /* table_index_build_scan, IndexBuildCallback */
 #include "nodes/execnodes.h"   /* IndexInfo full struct definition */
+#include "utils/builtins.h"
 #include "utils/fmgroids.h"     /* F_BTHANDLER */
 #include "utils/memutils.h"
 #include "utils/syscache.h"     /* SearchSysCache1, ReleaseSysCache, CLAOID */
@@ -35,13 +36,11 @@
 #include "src/include/pg_vault_tde_kms.h"
 #include "src/include/pg_vault_tde_crypto_ope.h"
 
-/*
- * Forward declaration of build function for identity checks.
- */
+/* Forward declaration of build function for identity checks. */
 static IndexBuildResult *pg_vault_tde_ope_ambuild(Relation heap, Relation index,
 												  IndexInfo *index_info);
 
-/* Mutable copy of the btree AM routine, patched with our ORE overrides */
+/* Mutable copy of the btree AM routine, patched with our OPE overrides */
 static IndexAmRoutine  tde_ope_btree_methods;
 
 /* Original (unmodified) btree AM — saved as a STATIC copy for safe delegation */
@@ -61,11 +60,9 @@ bool tde_iam_is_ope_btree_index(Relation index_rel)
 /*
  * tde_iam_ope_serialize_fixed_type — serialize fixed-size types to canonical big-endian.
  */
-static Size
+static void
 tde_iam_ope_serialize_fixed_type(Datum datum, Oid typoid, uint8 *buf)
 {
-	memset(buf, 0, 16);
-
 	switch (typoid)
 	{
 	case INT4OID:
@@ -73,14 +70,14 @@ tde_iam_ope_serialize_fixed_type(Datum datum, Oid typoid, uint8 *buf)
 		uint32 v = (uint32)DatumGetInt32(datum) ^ 0x80000000;
 		v = pg_hton32(v);
 		memcpy(buf, &v, 4);
-		return 4;
+		return;
 	}
 	break;
 	case DATEOID:
 	{
 		uint32 v = pg_hton32((uint32)DatumGetInt32(datum));
 		memcpy(buf, &v, 4);
-		return 4;
+		return;
 	}
 	break;
 	case INT8OID:
@@ -88,25 +85,26 @@ tde_iam_ope_serialize_fixed_type(Datum datum, Oid typoid, uint8 *buf)
 		uint64 v = (uint64)DatumGetInt64(datum) ^ 0x8000000000000000ULL;
 		v = pg_hton64(v);
 		memcpy(buf, &v, 8);
-		return 8;
+		return;
 	}
 	break;
 	case TIMESTAMPTZOID:
 	{
 		uint64 v = pg_hton64((uint64)DatumGetInt64(datum));
-		memcpy(buf, &v, 8);
-		return 8;
+		memcpy(buf, &v, 8);		
 	}
 	break;
 	case UUIDOID:
 	{
 		pg_uuid_t *uid = DatumGetUUIDP(datum);
 		memcpy(buf, uid->data, 16);
-		return 16;
 	}
 	break;
 	default:
-		return 0;
+		ereport(ERROR,
+				(errmsg("[IAM-OPE] tde_iam_ope_serialize_fixed_type: "
+						"unknown typoid %u, encryption not possible",
+						typoid)));
 		break;
 	}
 }
@@ -117,8 +115,7 @@ tde_iam_ope_serialize_fixed_type(Datum datum, Oid typoid, uint8 *buf)
 Datum
 tde_iam_ope_encrypt_fixed_type_datum(Relation index_rel, Datum datum, Oid typoid)
 {
-    uint8   plain_buf[16];
-	Size volatile plain_len;
+    uint8   plain_buf[32];
     Size    enc_len = 0;
     char   *encrypted;
     bytea  *enc_bytea = NULL;
@@ -126,15 +123,7 @@ tde_iam_ope_encrypt_fixed_type_datum(Relation index_rel, Datum datum, Oid typoid
 
 	memset(plain_buf, 0, sizeof(plain_buf));
 
-	plain_len = tde_iam_ope_serialize_fixed_type(datum, typoid, plain_buf);
-	if (plain_len == 0)
-	{
-		ereport(WARNING,
-				(errmsg("[IAM-OPE] tde_iam_ope_encrypt_fixed_type_datum: "
-						"unknown typoid %u, skipping encryption",
-						typoid)));
-		return datum;
-	}
+	tde_iam_ope_serialize_fixed_type(datum, typoid, plain_buf);
 
 	if (!pg_vault_tde_kms_get_rel_dek(RelationGetRelid(index_rel), dek, sizeof(dek)))
 	{
@@ -147,7 +136,7 @@ tde_iam_ope_encrypt_fixed_type_datum(Relation index_rel, Datum datum, Oid typoid
 	PG_TRY();
 	{
 		encrypted = tde_crypto_ope_encrypt((const char *)dek, sizeof(dek),
-										   (const char *)plain_buf, plain_len, true,
+										   (const char *)plain_buf, 32,
 										   &enc_len);
 		OPENSSL_cleanse(plain_buf, sizeof(plain_buf));
 
@@ -179,46 +168,66 @@ tde_iam_ope_encrypt_index_datum(Relation index_rel, Datum datum, bool typbyval, 
 	{
 		ereport(DEBUG2,
 				(errmsg("[IAM-OPE] Skipping index key encryption for "
-						"fixed-size column without enc_ops (typlen=%d, typbyval=%s)",
+						"variable-size column without enc_ops (typlen=%d, typbyval=%s)",
                         (int) typlen, typbyval ? "true" : "false")));
 		return datum;
 	}
 
 	{
-        bytea      *bval = NULL;
-		const char *plain;
-        Size        plen;
-        Size        enc_len = 0;
-        char       *encrypted;
-        bytea      *enc_bytea = NULL;
+		char *to_free = NULL;
+		char *plain;
+		Size plen;
+		Size enc_len = 0;
+		char *encrypted;
+		bytea *enc_bytea = NULL;
 		unsigned char dek[TDE_DEK_LEN];
 
-		if (typlen == -1)
+		/*
+		 * Fetch the true data type OID of the column from the index description
+		 * to see if we are dealing with standard text or a raw binary bytea block.
+		 */
+		Oid opcintype = index_rel->rd_opcintype[0]; // Primary key index operator type
+
+		if (opcintype == BYTEAOID)
 		{
-            bval  = (bytea *) PG_DETOAST_DATUM_COPY(datum);
-			plain = VARDATA_ANY(bval);
-            plen  = VARSIZE_ANY_EXHDR(bval);
+			/*
+			 * Safe Binary Extraction Path:
+			 * Directly read variable payload dimensions from header metadata tags
+			 * instead of relying on null-terminated string utilities like strlen.
+			 */
+			struct varlena *v = (struct varlena *)DatumGetPointer(datum);
+			plain = VARDATA_ANY(v);
+			plen = VARSIZE_ANY_EXHDR(v);
+			to_free = NULL; /* points directly inside index tuple memory workspace */
+		}
+		else if (typlen == -1)
+		{
+			/* Standard Text Extraction Path */
+			plain = text_to_cstring((const text *)DatumGetPointer(datum));
+			plen = strlen(plain) + 1; /* add 1 for the trailing \0 */
+			to_free = plain;		  /* we need to pfree text_to_cstring */
 		}
 		else
 		{
-			plain = DatumGetCString(datum);
-            plen  = strlen(plain) + 1;
+			plain = DatumGetCString(datum); /* cannot pfree pointer data maps */
+			plen = strlen(plain) + 1;		/* add 1 for the trailing \0 */
 		}
 
 		if (!pg_vault_tde_kms_get_rel_dek(RelationGetRelid(index_rel), dek, sizeof(dek)))
 		{
-            ereport(ERROR,
-                    (errmsg("[IAM-OPE] tde_iam_ope_encrypt_index_datum: "
-                            "DEK unavailable for index relid %u", RelationGetRelid(index_rel))));
+			ereport(ERROR,
+					(errmsg("[IAM-OPE] tde_iam_ope_encrypt_index_datum: "
+							"DEK unavailable for index relid %u",
+							RelationGetRelid(index_rel))));
 		}
 
 		PG_TRY();
 		{
 			encrypted = tde_crypto_ope_encrypt((const char *)dek, sizeof(dek),
-											   plain, plen, false,
+											   plain, plen,
 											   &enc_len);
 
-			enc_bytea = (bytea *) palloc(VARHDRSZ + enc_len);
+			enc_bytea = (bytea *)palloc(VARHDRSZ + enc_len);
 			SET_VARSIZE(enc_bytea, VARHDRSZ + enc_len);
 			memcpy(VARDATA(enc_bytea), encrypted, enc_len);
 			OPENSSL_cleanse(encrypted, enc_len);
@@ -230,12 +239,14 @@ tde_iam_ope_encrypt_index_datum(Relation index_rel, Datum datum, bool typbyval, 
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
-		if (bval)
-			pfree(bval);
+
+		if (to_free)
+			pfree(to_free);
 		OPENSSL_cleanse(dek, sizeof(dek));
+
 		return PointerGetDatum(enc_bytea);
 	}
-} 
+}
 
 /*
  * tde_iam_ope_bytea_cmp — B-Tree support function 1 (three-way comparator).
@@ -274,23 +285,7 @@ Datum tde_iam_ope_bytea_cmp(PG_FUNCTION_ARGS)
 	const char *ctxt_a = (const char *)VARDATA_ANY(a);
 	const char *ctxt_b = (const char *)VARDATA_ANY(b);
 
-	unsigned long len_a = VARSIZE_ANY_EXHDR(a);
-	unsigned long len_b = VARSIZE_ANY_EXHDR(b);
-
-	int result;
-
-	/*
-	 * Safety Guard: If either index token is corrupted, empty, or missing
-	 * its payload structure header, fall back to comparing raw data sizes.
-	 */
-	if (len_a < sizeof(OpeDynamicPayload) || len_b < sizeof(OpeDynamicPayload))
-	{
-		PG_RETURN_INT32(len_a - len_b);
-	}
-
-	/* Delegate structural evaluation directly to the new block ORE comparator */
-	// result = tde_crypto_ope_compare(ctxt_a, ctxt_b);
-	result = tde_crypto_ope_compare(ctxt_a, ctxt_b);
+	int result = tde_crypto_ope_compare(ctxt_a, ctxt_b);
 
 	PG_RETURN_INT32(result);
 }
@@ -390,7 +385,52 @@ Datum
 tde_iam_ope_timestamptz_cmp(PG_FUNCTION_ARGS) 
 { 
 	return DirectFunctionCall2(tde_iam_ope_bytea_cmp, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)); 
-} 
+}
+
+PG_FUNCTION_INFO_V1(tde_iam_ope_varchar_lt);
+Datum tde_iam_ope_varchar_lt(PG_FUNCTION_ARGS)
+{
+	Datum a = PG_GETARG_DATUM(0);
+	Datum b = PG_GETARG_DATUM(1);
+	int cmp = DirectFunctionCall2(tde_iam_ope_text_cmp, a, b);
+	PG_RETURN_BOOL(cmp < 0);
+}
+
+PG_FUNCTION_INFO_V1(tde_iam_ope_varchar_le);
+Datum tde_iam_ope_varchar_le(PG_FUNCTION_ARGS)
+{
+	Datum a = PG_GETARG_DATUM(0);
+	Datum b = PG_GETARG_DATUM(1);
+	int cmp = DirectFunctionCall2(tde_iam_ope_text_cmp, a, b);
+	PG_RETURN_BOOL(cmp <= 0);
+}
+
+PG_FUNCTION_INFO_V1(tde_iam_ope_varchar_gt);
+Datum tde_iam_ope_varchar_gt(PG_FUNCTION_ARGS)
+{
+	Datum a = PG_GETARG_DATUM(0);
+	Datum b = PG_GETARG_DATUM(1);
+	int cmp = DirectFunctionCall2(tde_iam_ope_text_cmp, a, b);
+	PG_RETURN_BOOL(cmp > 0);
+}
+
+PG_FUNCTION_INFO_V1(tde_iam_ope_varchar_ge);
+Datum tde_iam_ope_varchar_ge(PG_FUNCTION_ARGS)
+{
+	Datum a = PG_GETARG_DATUM(0);
+	Datum b = PG_GETARG_DATUM(1);
+	int cmp = DirectFunctionCall2(tde_iam_ope_text_cmp, a, b);
+	PG_RETURN_BOOL(cmp >= 0);
+}
+
+PG_FUNCTION_INFO_V1(tde_iam_ope_varchar_eq);
+Datum tde_iam_ope_varchar_eq(PG_FUNCTION_ARGS)
+{
+	Datum a = PG_GETARG_DATUM(0);
+	Datum b = PG_GETARG_DATUM(1);
+	int cmp = DirectFunctionCall2(tde_iam_ope_text_cmp, a, b);
+	PG_RETURN_BOOL(cmp == 0);
+}
 
 /* ── B-TREE PROXY ACCESS METHOD IMPLEMENTATION ──────────────────────────── */
 
@@ -457,21 +497,28 @@ pg_vault_tde_ope_aminsert(Relation index, Datum *values, bool *isnull,
 		{
             enc_values[i] = (Datum) 0;
 		}
-		else if (TDE_ope_IS_ENC_OPS_COL(index, i))
-		{
-			enc_values[i] = tde_iam_ope_encrypt_fixed_type_datum(
-				index,
-				values[i],
-				index->rd_opcintype[i]);
-		}
 		else
 		{
-			Form_pg_attribute att = TupleDescAttr(index->rd_att, i);
-            enc_values[i] = tde_iam_ope_encrypt_index_datum(
-                                index,
-                                values[i],
-                                att->attbyval,
-                                att->attlen);
+			Oid typoid = index->rd_opcintype[i];
+
+			if (typoid == INT4OID || typoid == INT8OID ||
+				typoid == DATEOID || typoid == TIMESTAMPTZOID ||
+				typoid == UUIDOID)
+			{
+				enc_values[i] = tde_iam_ope_encrypt_fixed_type_datum(
+					index,
+					values[i],
+					typoid);
+			}
+			else
+			{
+				Form_pg_attribute att = TupleDescAttr(index->rd_att, i);
+				enc_values[i] = tde_iam_ope_encrypt_index_datum(
+					index,
+					values[i],
+					att->attbyval,
+					att->attlen);
+			}
 		}
 	}
 
@@ -517,7 +564,6 @@ pg_vault_tde_ope_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
 	int i;
 
 	Assert(scan->indexRelation->rd_rel != NULL);
-
 	tde_ope_assert_not_impersonated(scan->indexRelation);
 	Assert(saved_btree_methods_valid);
 
@@ -525,58 +571,62 @@ pg_vault_tde_ope_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
 	{
 		for (i = 0; i < nkeys; i++)
 		{
+			// ONLY encrypt the query bounds argument data. Do not touch sk_func.
 			if ((keys[i].sk_flags & SK_ISNULL) == 0 &&
 				(keys[i].sk_strategy >= BTLessStrategyNumber &&
 				 keys[i].sk_strategy <= BTGreaterStrategyNumber))
 			{
 				int col = keys[i].sk_attno - 1;
 				Oid opcintype = scan->indexRelation->rd_opcintype[col];
-
-				/* 1. Encrypt the search arguments cleanly based on their true schema type */
+				
 				if (opcintype == INT4OID || opcintype == INT8OID ||
 					opcintype == DATEOID || opcintype == TIMESTAMPTZOID ||
 					opcintype == UUIDOID)
 				{
 					keys[i].sk_argument =
 						tde_iam_ope_encrypt_fixed_type_datum(scan->indexRelation,
-															 keys[i].sk_argument,
-															 opcintype);
+																keys[i].sk_argument,
+															 	opcintype);
+
+					/* Set the sk_func (boolean cmp function for rd_opcintype) to the bytea one*/
+					switch (keys[i].sk_strategy)
+					{
+					case BTLessStrategyNumber: /* 1: < */
+						fmgr_info(F_BYTEALT, &keys[i].sk_func);
+						break;
+					case BTLessEqualStrategyNumber: /* 2: <= */
+						fmgr_info(F_BYTEALE, &keys[i].sk_func);
+						break;
+					case BTEqualStrategyNumber: /* 3: = */
+						fmgr_info(F_BYTEAEQ, &keys[i].sk_func);
+						break;
+					case BTGreaterEqualStrategyNumber: /* 4: >= */
+						fmgr_info(F_BYTEAGE, &keys[i].sk_func);
+						break;
+					case BTGreaterStrategyNumber: /* 5: > */
+						fmgr_info(F_BYTEAGT, &keys[i].sk_func);
+						break;
+					default:
+						elog(ERROR, "[IAM-OPE] Unsupported B-Tree strategy number: %d",
+							 keys[i].sk_strategy);
+						break;
+					}
 				}
 				else
 				{
 					Form_pg_attribute att = TupleDescAttr(scan->indexRelation->rd_att, col);
 					keys[i].sk_argument =
 						tde_iam_ope_encrypt_index_datum(scan->indexRelation,
-														keys[i].sk_argument,
-														att->attbyval,
-														att->attlen);
-				}
-
-				/* Rebind sk_func to corresponding bytea boolean operator */
-				switch (keys[i].sk_strategy)
-				{
-				case BTLessStrategyNumber:
-					fmgr_info(F_BYTEALT, &keys[i].sk_func);
-					break;
-				case BTLessEqualStrategyNumber:
-					fmgr_info(F_BYTEALE, &keys[i].sk_func);
-					break;
-				case BTEqualStrategyNumber:
-					fmgr_info(F_BYTEAEQ, &keys[i].sk_func);
-					break;
-				case BTGreaterEqualStrategyNumber:
-					fmgr_info(F_BYTEAGE, &keys[i].sk_func);
-					break;
-				case BTGreaterStrategyNumber:
-					fmgr_info(F_BYTEAGT, &keys[i].sk_func);
-					break;
-				default:
-					break;
-				}
+															keys[i].sk_argument,
+															att->attbyval,
+															att->attlen);
+ 				}
 			}
 		}
 	}
-
+	
+	// Forward cleanly to native btree. It will automatically load your custom
+	// SQL-registered comparison handlers natively.
 	saved_btree_methods.amrescan(scan, keys, nkeys, orderbys, norderbys);
 }
 
@@ -608,7 +658,7 @@ pg_vault_tde_ope_amvalidate(Oid opclassoid)
 		return true;
 
 	return saved_btree_methods.amvalidate(opclassoid);
-} 
+}
 
 /*
  * tde_ope_iam_init — initialize tde_ope_btree access method routine table.

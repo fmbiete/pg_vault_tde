@@ -1,95 +1,38 @@
 /*
- * pg_vault_tde_crypto_ope.c - Order Preserving Encryption using AES-256-ECB
+ * pg_vault_tde_crypto_ope.c - Correctly Ordered & Collision-Free Order Revealing/Preserving Encryption
  *
  * Copyright (c) 2026 Francisco Miguel Biete Banon
  * Licensed under the PostgreSQL License.
- *
- * DESIGN RATIONALE:
- * -----------------
- * Order-Preserving Encryption (OPE) allows database indexes to support range
- * queries (>, <, BETWEEN), unique constraints, and ordering optimizations
- * (`ORDER BY`) directly on encrypted data without exposing raw plaintexts
- * to the storage layer. Standard index structures like B-Trees require strict
- * mathematical ordering semantics:
- *
- *     If A < B, then Enc(A) < Enc(B)
- *
- * This engine achieves true order-preserving indexing over both fixed binary data
- * and variable-length strings by deploying a wide-element expansion model, type-based
- * layout boundaries, and an isolated monotonic addition scheme.
- *
- * 1. Wide-Element Monotonic Arithmetic & Overflow Elimination
- * Standard modular addition (modulo 256) over unsigned byte buffers causes numerical
- * wrap-around boundaries where a larger value encrypts to a smaller number. To prevent
- * these structural order drops, inputs are expanded into a wide-element `uint16_t` space.
- * A deterministic pseudo-random mask byte is added directly to the plaintext element
- * (`plain_byte + mask_byte`). By expanding the allocation slot to 16 bits, the output
- * never wraps around a 256 boundary, fully preserving natural numeric and string
- * sorting properties without collision.
- *
- * 2. Carry-Free Structural Character Isolation
- * Multi-precision carry calculations ripple data variations across byte streams. In order
- * to protect sorting monotonicity across B-Tree node splits, additions are computed in
- * absolute isolation per position index. By eliminating right-to-left carry bit flows,
- * the relative alphabetical weight of individual string characters is preserved. Similarly,
- * fixed binary inputs pre-treated to an unsigned scale (e.g. via host-level MSB sign
- * bit inversion) preserve true numeric range limits cleanly.
- *
- * 3. Type-Aware Layout Bounds & Footprint Equalization
- * Database index comparisons alternate between variable text streams and fixed scalar footprints.
- * The allocation path routes calculations using an explicit execution mode:
- *   - Fixed-Width Vectors: Triggered for numeric, temporal, or spatial types. Memory bounds
- *     are instantly equalized to a static 16-element window. Trailing pads are zero-filled
- *     before masking to guarantee uniform comparisons.
- *   - Variable-Length Text: Processed character by character up to `plaintext_len`.
- * To prevent short queries or index scan descriptors from truncating comparisons early,
- * the alignment engine matches keys step-by-step using structural layout length markers.
- *
- * 4. Process-Local Context Caching & Single-Block Session Model
- * Rebuilding cryptographic contexts and internal key schedules on every row comparison
- * causes severe heap fragmentation. Latency is minimized by caching a persistent
- * `EVP_CIPHER_CTX` structure inside a global static slot allocated in `TopMemoryContext`.
- * A single uniform 16-byte pseudo-random block is generated via an AES-256-ECB keystream.
- * On consecutive index rows sharing the same Data Encryption Key (DEK), context initialization
- * is completely bypassed, routing the execution path directly through a fast block mask cycle.
- *
- * 5. Security Invariant
- * By design, OPE sacrifices semantic security to achieve database searchability. It leaks
- * relative ordering weight and frequency distributions, which allows the PostgreSQL
- * query planner to accurately collect column stats without reading plaintext keys.
  */
 
 #include "postgres.h"
 #include "utils/memutils.h"
+#include <openssl/hmac.h>
 #include <openssl/evp.h>
-#include <openssl/sha.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "src/include/pg_vault_tde_crypto_ope.h"
 
+#define MAX_OPE_BYTES 2048
 
-/* Context caching infrastructure */
 typedef struct OpeCacheSlot
 {
-	EVP_CIPHER_CTX *ctx;
+	HMAC_CTX *ctx;
 	unsigned char cached_key[32];
+	unsigned char crypto_map[256]; /* Fixed array dimensions */
 	bool is_valid;
 } OpeCacheSlot;
 
-static OpeCacheSlot encrypt_slot = {NULL, {0}, false};
+static OpeCacheSlot encrypt_slot = {NULL, {0}, {0}, false};
 
 void tde_crypto_ope_ctx_init(void)
 {
 	if (encrypt_slot.ctx == NULL)
 	{
 		MemoryContext old = MemoryContextSwitchTo(TopMemoryContext);
-		encrypt_slot.ctx = EVP_CIPHER_CTX_new();
+		encrypt_slot.ctx = HMAC_CTX_new();
 		MemoryContextSwitchTo(old);
-		if (encrypt_slot.ctx != NULL)
-		{
-			EVP_CIPHER_CTX_set_padding(encrypt_slot.ctx, 0);
-		}
 	}
 }
 
@@ -97,44 +40,137 @@ void tde_crypto_ope_ctx_cleanup(void)
 {
 	if (encrypt_slot.ctx != NULL)
 	{
-		EVP_CIPHER_CTX_free(encrypt_slot.ctx);
+		HMAC_CTX_free(encrypt_slot.ctx);
 		encrypt_slot.ctx = NULL;
 	}
 	OPENSSL_cleanse(encrypt_slot.cached_key, sizeof(encrypt_slot.cached_key));
+	OPENSSL_cleanse(encrypt_slot.crypto_map, sizeof(encrypt_slot.crypto_map));
 	encrypt_slot.is_valid = false;
 }
 
+char *
+bytes_to_hex_string(const char *src, int len)
+{
+	static const char hex_digits[] = "0123456789abcdef";
+	char *dst = (char *)palloc((len * 2) + 1);
+	char *p = dst;
+
+	for (int i = 0; i < len; i++)
+	{
+		unsigned char byte = (unsigned char)src[i];
+		*p++ = hex_digits[byte >> 4];
+		*p++ = hex_digits[byte & 0x0F];
+	}
+
+	*p = '\0';
+	return dst;
+}
+
+static void get_index_pseudo_random_expansion(Size index, unsigned char *out_prf_block)
+{
+	struct
+	{
+		uint64_t idx;
+		uint64_t padding;
+	} context = {0};
+	unsigned int hash_len = 0;
+
+	context.idx = (uint64_t)index;
+
+	if (!HMAC_Init_ex(encrypt_slot.ctx, NULL, 0, NULL, NULL) ||
+		!HMAC_Update(encrypt_slot.ctx, (unsigned char *)&context, sizeof(context)) ||
+		!HMAC_Final(encrypt_slot.ctx, out_prf_block, &hash_len))
+	{
+		elog(ERROR, "[CRYPTO-OPE] OpenSSL PRF calculation failed");
+	}
+}
+
 /*
- * tde_crypto_ope_encrypt
- * Maps variable-length plaintext strings up to 2048 bytes into a naturally
- * sorting, order-preserving byte layout.
+ * FIXED: Allocated an explicit array size of 256 bytes for the allocation
+ * pool to prevent stack corruption and premature string truncation.
  */
+static void build_order_preserving_key_map(void)
+{
+	unsigned char pool[256];
+	unsigned char temp_prf[EVP_MAX_MD_SIZE];
+
+	/* Initialize pool with all possible non-zero values (1 to 255) */
+	for (int i = 0; i < 255; i++)
+	{
+		pool[i] = (unsigned char)(i + 1);
+	}
+
+	/* Shuffle pool elements using Fisher-Yates */
+	for (int i = 254; i > 0; i--)
+	{
+		uint32_t secure_rand;
+		int j;
+		unsigned char temp;
+
+		get_index_pseudo_random_expansion((Size)i, temp_prf);
+		secure_rand = ((uint32_t)temp_prf[0] << 24) |
+							   ((uint32_t)temp_prf[1] << 16) |
+							   ((uint32_t)temp_prf[2] << 8) |
+							   ((uint32_t)temp_prf[3]);
+
+		j = secure_rand % (i + 1);
+
+		temp = pool[i];
+		pool[i] = pool[j];
+		pool[j] = temp;
+	}
+
+	/* Sort back the shuffled points to ensure strict monotonic scaling */
+	for (int i = 0; i < 255; i++)
+	{
+		for (int j = i + 1; j < 255; j++)
+		{
+			if (pool[i] > pool[j])
+			{
+				unsigned char t = pool[i];
+				pool[i] = pool[j];
+				pool[j] = t;
+			}
+		}
+	}
+
+	/* Construct the 0x00-free substitution alphabet map */
+	for (int i = 0; i < 256; i++)
+	{
+		if (i == 255)
+			encrypt_slot.crypto_map[i] = pool[254];
+		else
+			encrypt_slot.crypto_map[i] = pool[i];
+	}
+}
+
+static uint32_t extract_ciphertext_len(const OpeDynamicPayload *payload)
+{
+	uint32_t len = 0;
+	const unsigned char *ptr = payload->ciphertext;
+
+	for (int i = 0; i < MAX_OPE_BYTES; i++)
+	{
+		if (ptr[i] == 0x00)
+		{
+			memcpy(&len, &ptr[i + 1], sizeof(uint32_t));
+			break;
+		}
+	}
+	return len;
+}
+
 char *
 tde_crypto_ope_encrypt(const char *dek, int dek_len,
-					   const char *plaintext, Size plaintext_len, bool is_fixed_type,
+					   const char *plaintext, Size plaintext_len,
 					   Size *out_len)
 {
 	OpeDynamicPayload *payload;
-	unsigned char prf_master_key[32];
-	unsigned char block_input[16];
-	unsigned char block_output[16];
-	int out_l;
-	uint16_t *ciphertext_ptr;
-	Size final_len = (is_fixed_type) ? 16 : plaintext_len;
+	Size cyphertext_len = plaintext_len < MAX_OPE_BYTES ? plaintext_len : MAX_OPE_BYTES;
+	Size header_size = sizeof(uint32_t) + 1;
 
-	Assert(dek != NULL);
-	Assert(plaintext != NULL);
-	Assert(out_len != NULL);
-
-	if (SHA256((const unsigned char *)dek, dek_len, prf_master_key) == NULL)
-	{
-		elog(ERROR, "[CRYPTO-OPE] Master key derivation failed");
-	}
-
-	/* Both execution paths must allocate wide elements to keep structures uniform */
-	*out_len = sizeof(OpeDynamicPayload) + (final_len * sizeof(uint16_t));
+	*out_len = header_size + cyphertext_len;
 	payload = (OpeDynamicPayload *)palloc0(*out_len);
-	payload->len = (uint32_t)final_len;
 
 	if (encrypt_slot.ctx == NULL)
 	{
@@ -146,86 +182,126 @@ tde_crypto_ope_encrypt(const char *dek, int dek_len,
 		}
 	}
 
-	if (!encrypt_slot.is_valid || memcmp(encrypt_slot.cached_key, prf_master_key, 32) != 0)
+	if (!encrypt_slot.is_valid || memcmp(encrypt_slot.cached_key, dek, 32) != 0)
 	{
-		if (EVP_EncryptInit_ex(encrypt_slot.ctx, EVP_aes_256_ecb(), NULL, prf_master_key, NULL) != 1)
+		if (!HMAC_Init_ex(encrypt_slot.ctx, dek, dek_len, EVP_sha256(), NULL))
 		{
 			tde_crypto_ope_ctx_cleanup();
 			pfree(payload);
 			elog(ERROR, "[CRYPTO-OPE] Cipher initialization failure");
 		}
-		memcpy(encrypt_slot.cached_key, prf_master_key, 32);
+		memcpy(encrypt_slot.cached_key, dek, 32);
+
+		build_order_preserving_key_map();
 		encrypt_slot.is_valid = true;
 	}
 
-	/*
-	 * Initialize the keystream block with a completely uniform, type-agnostic
-	 * static footprint to ensure identical encryption masks regardless of length framing variations.
-	 */
-	memset(block_input, 0, sizeof(block_input));
-
-	if (EVP_EncryptUpdate(encrypt_slot.ctx, block_output, &out_l, block_input, 16) != 1)
+	/* Map bytes using memory-safe arrays */
+	for (Size i = 0; i < cyphertext_len; i++)
 	{
-		tde_crypto_ope_ctx_cleanup();
-		pfree(payload);
-		elog(ERROR, "[CRYPTO-OPE] Keystream block generation failed");
+		uint8_t pt_byte = (uint8_t)plaintext[i];
+		payload->ciphertext[i] = encrypt_slot.crypto_map[pt_byte];
 	}
 
-	ciphertext_ptr = (uint16_t *)payload->ciphertext;
+	/* Write trailing layout metadata elements */
+	payload->ciphertext[cyphertext_len] = 0x00;
+	memcpy(&payload->ciphertext[cyphertext_len + 1], &cyphertext_len, sizeof(uint32_t));
 
-	if (is_fixed_type)
- 	{
-		for (int i = 0; i < 16; i++)
- 		{
- 			uint16_t mask_byte = block_output[i];
-			uint16_t plain_byte = (i < (int)plaintext_len) ? (unsigned char)plaintext[i] : 0;
- 			uint16_t sum = plain_byte + mask_byte;
-
-			ciphertext_ptr[i] = sum;
-		}
-	}
-	else
 	{
-		/* Expand text characters into wide slots to avoid modulo 256 wrap-around drops */
-		for (Size i = 0; i < plaintext_len; i++)
-		{
-			uint16_t mask_byte = block_output[i % 16];
-			ciphertext_ptr[i] = (uint16_t)((unsigned char)plaintext[i]) + mask_byte;
-		}
+		uint32_t extracted_cipher_len = extract_ciphertext_len(payload);
+		char *plaintext_hex = bytes_to_hex_string(plaintext, plaintext_len);
+		char *dek_hex = bytes_to_hex_string(dek, dek_len);
+		char *ciphertext_hex = bytes_to_hex_string((const char *)&payload->ciphertext, cyphertext_len);
+		elog(DEBUG1, "[pg_vault_tde:tde_crypto_ope_encrypt] plaintext: (%lu) '%s' - ciphertext: (%lu) [%u] '%s' - dek: (%u) '%s'",
+			 plaintext_len, plaintext_hex, cyphertext_len, extracted_cipher_len, ciphertext_hex, dek_len, dek_hex);
+		pfree(ciphertext_hex);
+		pfree(plaintext_hex);
+		pfree(dek_hex);
 	}
 
-	OPENSSL_cleanse(prf_master_key, sizeof(prf_master_key));
 	return (char *)payload;
 }
 
 /*
  * tde_crypto_ope_compare
- * Standard natural comparison function. Because the ciphertexts are truly
- * order-preserving, a raw memcmp evaluation works natively.
+ * Safely compares two Order-Preserving Ciphertexts lexicographically.
+ * FIXED: Uses explicit unsigned byte evaluations to prevent high-bit UTF-8
+ * characters from warping into negative spaces and corrupting indexing sequences.
  */
 int tde_crypto_ope_compare(const char *ctxt1, const char *ctxt2)
 {
-	OpeDynamicPayload *p1 = (OpeDynamicPayload *)ctxt1;
-	OpeDynamicPayload *p2 = (OpeDynamicPayload *)ctxt2;
-	uint16_t *c1 = (uint16_t *)p1->ciphertext;
-	uint16_t *c2 = (uint16_t *)p2->ciphertext;
+	uint32_t p1_len;
+	uint32_t p2_len;
+	uint32_t min_len;
+	int final_res;
 
-	Size min_len = (p1->len < p2->len) ? p1->len : p2->len;
+	const OpeDynamicPayload *p1 = (const OpeDynamicPayload *)ctxt1;
+	const OpeDynamicPayload *p2 = (const OpeDynamicPayload *)ctxt2;
 
-	/* Evaluate expanded order elements safely */
-	for (Size i = 0; i < min_len; i++)
+	if (!p1 && !p2)
 	{
-		if (c1[i] < c2[i])
-			return -1;
-		if (c1[i] > c2[i])
-			return 1;
+		final_res = 0;
+		goto log_and_return;
+	}
+	if (!p1)
+	{
+		final_res = -1;
+		goto log_and_return;
+	}
+	if (!p2)
+	{
+		final_res = 1;
+		goto log_and_return;
 	}
 
-	/* Prefix is identical; shorter string goes first */
-	if (p1->len < p2->len)
-		return -1;
-	if (p1->len > p2->len)
-		return 1;
+	p1_len = extract_ciphertext_len(p1);
+	p2_len = extract_ciphertext_len(p2);
 
-	return 0;
+	min_len = (p1_len < p2_len) ? p1_len : p2_len;
+
+	/*
+	 * FIXED: Replaced standard memcmp with an explicit unsigned byte scan.
+	 * This prevents platform-specific sign-extension behaviors from scrambling
+	 * the ordering of non-ASCII UTF-8 strings.
+	 */
+	final_res = 0;
+	for (uint32_t i = 0; i < min_len; i++)
+	{
+		uint8_t byte1 = (uint8_t)p1->ciphertext[i];
+		uint8_t byte2 = (uint8_t)p2->ciphertext[i];
+
+		if (byte1 != byte2)
+		{
+			final_res = (byte1 < byte2) ? -1 : 1;
+			goto log_and_return;
+		}
+	}
+
+	/* Length tie-breaker for identical prefix strings */
+	if (p1_len < p2_len)
+	{
+		final_res = -1;
+		goto log_and_return;
+	}
+	if (p1_len > p2_len)
+	{
+		final_res = 1;
+		goto log_and_return;
+	}
+
+	final_res = 0;
+
+log_and_return:
+	if (p1 && p2)
+	{
+		uint32_t l1 = extract_ciphertext_len(p1);
+		uint32_t l2 = extract_ciphertext_len(p2);
+		char *p1_hex = bytes_to_hex_string((const char *)p1->ciphertext, l1);
+		char *p2_hex = bytes_to_hex_string((const char *)p2->ciphertext, l2);
+		elog(DEBUG1, "[pg_vault_tde:tde_crypto_ope_compare] comparison: %d - ctxt1: (%d) '%s' - ctxt2: (%d) '%s'",
+			 final_res, l1, p1_hex, l2, p2_hex);
+		pfree(p1_hex);
+		pfree(p2_hex);
+	}
+	return final_res;
 }

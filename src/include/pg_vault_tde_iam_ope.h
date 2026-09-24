@@ -13,7 +13,7 @@
 #include "utils/uuid.h"          /* DatumGetUUIDP, pg_uuid_t */
 
 /*
- * ORE function
+ * OPE function
  * Callers MUST OPENSSL_cleanse + pfree the returned buffers after use if applicable.
  */
 char *tde_iam_ope_encrypt_key(Oid idx_oid, const char *dek, int dek_len,
