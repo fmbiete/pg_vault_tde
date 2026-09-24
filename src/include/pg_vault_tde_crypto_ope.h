@@ -28,7 +28,7 @@ void		tde_crypto_ope_ctx_cleanup(void);
 
 char	   *bytes_to_hex_string(const char *src, int len);
 
-char	   *tde_crypto_ope_encrypt(const char *dek, int dek_len,
+char	   *tde_crypto_ope_encrypt(const char *dek,
 								   const char *plaintext, Size plaintext_len,
 								   Size *out_len);
 

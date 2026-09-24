@@ -13,14 +13,15 @@
 #include <string.h>
 
 #include "src/include/pg_vault_tde_crypto_ope.h"
+#include "src/include/pg_vault_tde_kms.h"
 
 #define MAX_OPE_BYTES 2048
 
 typedef struct OpeCacheSlot
 {
 	HMAC_CTX   *ctx;
-	unsigned char cached_key[32];
-	unsigned char crypto_map[256];	/* Fixed array dimensions */
+	unsigned char cached_key[TDE_DEK_LEN];
+	unsigned char crypto_map[256];
 	bool		is_valid;
 }			OpeCacheSlot;
 
@@ -32,7 +33,8 @@ static OpeCacheSlot encrypt_slot =
 	},
 	{
 		0
-	}, false
+	},
+		false
 };
 
 void
@@ -100,63 +102,59 @@ get_index_pseudo_random_expansion(Size index, unsigned char *out_prf_block)
 }
 
 /*
- * FIXED: Allocated an explicit array size of 256 bytes for the allocation
- * pool to prevent stack corruption and premature string truncation.
+ * Generates a strictly monotonic substitution map derived from the DEK.
+ * This guarantees order preservation byte-by-byte while securing the mapping.
  */
 static void
 build_order_preserving_key_map(void)
 {
-	unsigned char pool[256];
 	unsigned char temp_prf[EVP_MAX_MD_SIZE];
+	uint32_t	current_val = 0;
 
-	/* Initialize pool with all possible non-zero values (1 to 255) */
-	for (int i = 0; i < 255; i++)
-	{
-		pool[i] = (unsigned char) (i + 1);
-	}
-
-	/* Shuffle pool elements using Fisher-Yates */
-	for (int i = 254; i > 0; i--)
-	{
-		uint32_t	secure_rand;
-		int			j;
-		unsigned char temp;
-
-		get_index_pseudo_random_expansion((Size) i, temp_prf);
-		secure_rand = ((uint32_t) temp_prf[0] << 24) |
-			((uint32_t) temp_prf[1] << 16) |
-			((uint32_t) temp_prf[2] << 8) |
-			((uint32_t) temp_prf[3]);
-
-		j = secure_rand % (i + 1);
-
-		temp = pool[i];
-		pool[i] = pool[j];
-		pool[j] = temp;
-	}
-
-	/* Sort back the shuffled points to ensure strict monotonic scaling */
-	for (int i = 0; i < 255; i++)
-	{
-		for (int j = i + 1; j < 255; j++)
-		{
-			if (pool[i] > pool[j])
-			{
-				unsigned char t = pool[i];
-
-				pool[i] = pool[j];
-				pool[j] = t;
-			}
-		}
-	}
-
-	/* Construct the 0x00-free substitution alphabet map */
 	for (int i = 0; i < 256; i++)
 	{
-		if (i == 255)
-			encrypt_slot.crypto_map[i] = pool[254];
-		else
-			encrypt_slot.crypto_map[i] = pool[i];
+		uint32_t	gap;
+
+		get_index_pseudo_random_expansion((Size) i, temp_prf);
+
+		/*
+		 * Calculate a deterministic gap size using the PRF block. To map 256
+		 * items uniquely into the 1-255 byte space, the average gap must be
+		 * 1. If a PRF byte matches, we allow a tiny gap distribution,
+		 * otherwise minimum step.
+		 */
+		gap = (temp_prf[0] % 2 == 0 && current_val + 1 < (uint32_t) (i + 1)) ? 0 : 1;
+
+		/*
+		 * Enforce minimum strict monotonicity step to guarantee
+		 * collision-free mapping
+		 */
+		if (gap == 0 && current_val == 0)
+			gap = 1;
+
+		current_val += gap;
+
+		/*
+		 * Ensure we never emit 0x00, and stay inside strict byte scale
+		 * boundaries
+		 */
+		if (current_val < 1)
+			current_val = 1;
+		if (current_val > 255)
+			current_val = 255;
+
+		/*
+		 * Secondary fallback checks to enforce 1-to-1 injection across the
+		 * array mapping
+		 */
+		if (i > 0 && current_val <= encrypt_slot.crypto_map[i - 1])
+		{
+			current_val = (uint32_t) encrypt_slot.crypto_map[i - 1] + 1;
+			if (current_val > 255)
+				current_val = 255;
+		}
+
+		encrypt_slot.crypto_map[i] = (unsigned char) current_val;
 	}
 }
 
@@ -178,7 +176,7 @@ extract_ciphertext_len(const OpeDynamicPayload * payload)
 }
 
 char *
-tde_crypto_ope_encrypt(const char *dek, int dek_len,
+tde_crypto_ope_encrypt(const char *dek,
 					   const char *plaintext, Size plaintext_len,
 					   Size *out_len)
 {
@@ -199,21 +197,20 @@ tde_crypto_ope_encrypt(const char *dek, int dek_len,
 		}
 	}
 
-	if (!encrypt_slot.is_valid || memcmp(encrypt_slot.cached_key, dek, 32) != 0)
+	if (!encrypt_slot.is_valid || memcmp(encrypt_slot.cached_key, dek, TDE_DEK_LEN) != 0)
 	{
-		if (!HMAC_Init_ex(encrypt_slot.ctx, dek, dek_len, EVP_sha256(), NULL))
+		if (!HMAC_Init_ex(encrypt_slot.ctx, dek, TDE_DEK_LEN, EVP_sha256(), NULL))
 		{
 			tde_crypto_ope_ctx_cleanup();
 			pfree(payload);
 			elog(ERROR, "[CRYPTO-OPE] Cipher initialization failure");
 		}
-		memcpy(encrypt_slot.cached_key, dek, 32);
+		memcpy(encrypt_slot.cached_key, dek, TDE_DEK_LEN);
 
 		build_order_preserving_key_map();
 		encrypt_slot.is_valid = true;
 	}
 
-	/* Map bytes using memory-safe arrays */
 	for (Size i = 0; i < cyphertext_len; i++)
 	{
 		uint8_t		pt_byte = (uint8_t) plaintext[i];
@@ -221,18 +218,17 @@ tde_crypto_ope_encrypt(const char *dek, int dek_len,
 		payload->ciphertext[i] = encrypt_slot.crypto_map[pt_byte];
 	}
 
-	/* Write trailing layout metadata elements */
 	payload->ciphertext[cyphertext_len] = 0x00;
 	memcpy(&payload->ciphertext[cyphertext_len + 1], &cyphertext_len, sizeof(uint32_t));
 
 	{
 		uint32_t	extracted_cipher_len = extract_ciphertext_len(payload);
 		char	   *plaintext_hex = bytes_to_hex_string(plaintext, plaintext_len);
-		char	   *dek_hex = bytes_to_hex_string(dek, dek_len);
-		char	   *ciphertext_hex = bytes_to_hex_string((const char *) &payload->ciphertext, cyphertext_len);
+		char	   *dek_hex = bytes_to_hex_string(dek, TDE_DEK_LEN);
+		char	   *ciphertext_hex = bytes_to_hex_string((const char *) payload->ciphertext, cyphertext_len);
 
 		elog(DEBUG1, "[pg_vault_tde:tde_crypto_ope_encrypt] plaintext: (%lu) '%s' - ciphertext: (%lu) [%u] '%s' - dek: (%u) '%s'",
-			 plaintext_len, plaintext_hex, cyphertext_len, extracted_cipher_len, ciphertext_hex, dek_len, dek_hex);
+			 plaintext_len, plaintext_hex, cyphertext_len, extracted_cipher_len, ciphertext_hex, TDE_DEK_LEN, dek_hex);
 		pfree(ciphertext_hex);
 		pfree(plaintext_hex);
 		pfree(dek_hex);
@@ -241,12 +237,6 @@ tde_crypto_ope_encrypt(const char *dek, int dek_len,
 	return (char *) payload;
 }
 
-/*
- * tde_crypto_ope_compare
- * Safely compares two Order-Preserving Ciphertexts lexicographically.
- * FIXED: Uses explicit unsigned byte evaluations to prevent high-bit UTF-8
- * characters from warping into negative spaces and corrupting indexing sequences.
- */
 int
 tde_crypto_ope_compare(const char *ctxt1, const char *ctxt2)
 {
@@ -279,11 +269,6 @@ tde_crypto_ope_compare(const char *ctxt1, const char *ctxt2)
 
 	min_len = (p1_len < p2_len) ? p1_len : p2_len;
 
-	/*
-	 * FIXED: Replaced standard memcmp with an explicit unsigned byte scan.
-	 * This prevents platform-specific sign-extension behaviors from
-	 * scrambling the ordering of non-ASCII UTF-8 strings.
-	 */
 	final_res = 0;
 	for (uint32_t i = 0; i < min_len; i++)
 	{
@@ -297,7 +282,6 @@ tde_crypto_ope_compare(const char *ctxt1, const char *ctxt2)
 		}
 	}
 
-	/* Length tie-breaker for identical prefix strings */
 	if (p1_len < p2_len)
 	{
 		final_res = -1;

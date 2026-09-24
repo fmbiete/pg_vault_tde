@@ -141,7 +141,7 @@ tde_iam_ope_encrypt_fixed_type_datum(Relation index_rel, Datum datum, Oid typoid
 
 	PG_TRY();
 	{
-		encrypted = tde_crypto_ope_encrypt((const char *) dek, sizeof(dek),
+		encrypted = tde_crypto_ope_encrypt((const char *) dek,
 										   (const char *) plain_buf, 32,
 										   &enc_len);
 		OPENSSL_cleanse(plain_buf, sizeof(plain_buf));
@@ -195,9 +195,9 @@ tde_iam_ope_encrypt_index_datum(Relation index_rel, Datum datum, bool typbyval, 
 		 */
 		Oid			opcintype = index_rel->rd_opcintype[0];
 
-		//Primary key index operator type
+		/* Primary key index operator type */
 
-			if (opcintype == BYTEAOID)
+		if (opcintype == BYTEAOID)
 		{
 			/*
 			 * Safe Binary Extraction Path: Directly read variable payload
@@ -234,7 +234,7 @@ tde_iam_ope_encrypt_index_datum(Relation index_rel, Datum datum, bool typbyval, 
 
 		PG_TRY();
 		{
-			encrypted = tde_crypto_ope_encrypt((const char *) dek, sizeof(dek),
+			encrypted = tde_crypto_ope_encrypt((const char *) dek,
 											   plain, plen,
 											   &enc_len);
 
