@@ -9,25 +9,26 @@
 
 #include "postgres.h"
 #include "access/amapi.h"
-#include "catalog/pg_type_d.h"   /* INT4OID, INT8OID, DATEOID, TIMESTAMPTZOID, UUIDOID */
-#include "utils/uuid.h"          /* DatumGetUUIDP, pg_uuid_t */
+#include "catalog/pg_type_d.h"	/* INT4OID, INT8OID, DATEOID, TIMESTAMPTZOID,
+								 * UUIDOID */
+#include "utils/uuid.h"			/* DatumGetUUIDP, pg_uuid_t */
 
 /*
  * OPE function
  * Callers MUST OPENSSL_cleanse + pfree the returned buffers after use if applicable.
  */
-char *tde_iam_ope_encrypt_key(Oid idx_oid, const char *dek, int dek_len,
-                           const char *plaintext, Size plaintext_len, Size *out_len);
+char	   *tde_iam_ope_encrypt_key(Oid idx_oid, const char *dek, int dek_len,
+									const char *plaintext, Size plaintext_len, Size *out_len);
 
 /*
  * tde_iam_ope_encrypt_index_datum — encrypt a typed Datum using ORE.
  */
-Datum tde_iam_ope_encrypt_index_datum(Relation index_rel, Datum datum, bool typbyval, int16 typlen);
+Datum		tde_iam_ope_encrypt_index_datum(Relation index_rel, Datum datum, bool typbyval, int16 typlen);
 
 /*
  * tde_iam_ope_encrypt_fixed_type_datum — canonical big-endian serialisation + ORE.
  */
-Datum tde_iam_ope_encrypt_fixed_type_datum(Relation index_rel, Datum datum, Oid typoid);
+Datum		tde_iam_ope_encrypt_fixed_type_datum(Relation index_rel, Datum datum, Oid typoid);
 
 /*
  * B-Tree support function 1 (comparator) and operator functions for ORE
@@ -72,11 +73,11 @@ const IndexAmRoutine *pg_vault_tde_get_iam_ope_routine(void);
 /*
  * tde_ope_iam_init — initialize tde_ope_btree at server startup.
  */
-void tde_ope_iam_init(void);
+void		tde_ope_iam_init(void);
 
 /*
  * Free per-backend ORE contexts on backend exit.
  */
-void tde_ope_iam_ctx_cleanup(void);
+void		tde_ope_iam_ctx_cleanup(void);
 
-#endif /* PG_VAULT_TDE_IAM_OPE_H */
+#endif							/* PG_VAULT_TDE_IAM_OPE_H */

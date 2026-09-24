@@ -21,17 +21,17 @@ typedef struct OpeDynamicPayload
 		unsigned char first_byte;
 		unsigned char ciphertext[0];
 	};
-} OpeDynamicPayload;
+}			OpeDynamicPayload;
 
-void tde_crypto_ope_ctx_init(void);
-void tde_crypto_ope_ctx_cleanup(void);
+void		tde_crypto_ope_ctx_init(void);
+void		tde_crypto_ope_ctx_cleanup(void);
 
-char * bytes_to_hex_string(const char *src, int len);
+char	   *bytes_to_hex_string(const char *src, int len);
 
-char *tde_crypto_ope_encrypt(const char *dek, int dek_len,
-								 const char *plaintext, Size plaintext_len,
-								 Size *out_len);
+char	   *tde_crypto_ope_encrypt(const char *dek, int dek_len,
+								   const char *plaintext, Size plaintext_len,
+								   Size *out_len);
 
-int tde_crypto_ope_compare(const char *ctxt1, const char *ctxt2);
+int			tde_crypto_ope_compare(const char *ctxt1, const char *ctxt2);
 
-#endif /* PG_VAULT_TDE_CRYPTO_OPE_H */
+#endif							/* PG_VAULT_TDE_CRYPTO_OPE_H */
