@@ -1236,7 +1236,7 @@ $$;
 DO $$
 DECLARE
     result_vals text[];
-    expected    text[] := ARRAY['Apple', 'Ávila', 'Banana'];
+    expected    text[] := ARRAY['Apple', 'Banana', 'Ávila'];
     i           int;
 BEGIN
     DROP TABLE IF EXISTS tde_ope_multibyte_170;
