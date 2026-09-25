@@ -243,7 +243,7 @@ $$;
 -- Inserts two rows and verifies that a single-row equality lookup
 -- on int8=9876543210 via tde_ope_btree with tde_ope_int8_enc_ops returns
 -- the correct associated label, exercising the 8-byte big-endian
--- serialisation + OPE AES-256-ECB encryption path.
+-- serialisation + OPE path.
 -- ================================================================
 DO $$
 DECLARE
@@ -277,7 +277,7 @@ $$;
 --
 -- Inserts two rows with distinct UUIDs and verifies that the equality
 -- lookup on the known UUID returns the correct id, exercising the
--- 16-byte RFC 4122 wire-bytes serialisation + OPE AES-256-ECB path.
+-- 16-byte RFC 4122 wire-bytes serialisation + OPE path.
 -- ================================================================
 DO $$
 DECLARE
@@ -314,7 +314,7 @@ $$;
 --
 -- Inserts two rows with distinct dates and verifies the equality
 -- lookup on 2026-01-01 returns the correct label, exercising the
--- int32 big-endian serialisation for DateADT + OPE AES-256-ECB path.
+-- int32 big-endian serialisation for DateADT + OPE path.
 -- ================================================================
 DO $$
 DECLARE
@@ -351,7 +351,7 @@ $$;
 -- Inserts two rows with distinct timestamps and verifies the equality
 -- lookup on 2026-06-09 12:00:00+00 returns the correct label,
 -- exercising the int64 big-endian serialisation for TimestampTz
--- + OPE AES-256-ECB path.
+-- + OPE path.
 -- ================================================================
 DO $$
 DECLARE
@@ -386,7 +386,7 @@ $$;
 -- TEST 151: DEK rotation — stale enc_ops index returns NULL,
 --           REINDEX restores lookup
 --
--- OPE AES-256-ECB is deterministic under a given DEK.  After rotating
+-- OPE is deterministic under a given DEK.  After rotating
 -- the per-table DEK, the search predicate is re-encrypted with DEK-B
 -- while the stored index keys were encrypted with DEK-A: no match is
 -- found (NULL).  After REINDEX the keys are re-encrypted with DEK-B

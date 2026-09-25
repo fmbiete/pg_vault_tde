@@ -47,9 +47,75 @@ static IndexAmRoutine tde_ope_btree_methods;
 static IndexAmRoutine saved_btree_methods;
 static bool saved_btree_methods_valid = false;
 
+/*----------------------------- OPERATORS -----------------------------*/
+/*
+ * tde_iam_ope_bytea_cmp — B-Tree support function 1 (three-way comparator).
+ * Evaluates the structural relative order of two ORE dynamic payload ciphertexts.
+ */
+PG_FUNCTION_INFO_V1(tde_iam_ope_bytea_cmp);
+Datum
+tde_iam_ope_bytea_cmp(PG_FUNCTION_ARGS)
+{
+	bytea	   *a = PG_GETARG_BYTEA_PP(0);
+	bytea	   *b = PG_GETARG_BYTEA_PP(1);
+
+	/* Extract direct pointers to the serialized OpeDynamicPayload structures */
+	const char *ctxt_a = (const char *) VARDATA_ANY(a);
+	const char *ctxt_b = (const char *) VARDATA_ANY(b);
+
+	int			result = tde_crypto_ope_compare(ctxt_a, ctxt_b);
+
+	PG_RETURN_INT32(result);
+}
+
 
 /*
- * Check if the index relation is managed by tde_ope_btree
+ * Macro template to generate a standard boolean operator wrapper.
+ * This completely removes the copy-pasted DirectFunctionCall2 boilerplate.
+ */
+#define DEFINE_OPE_BOOL_OP(func_name, operator_macro)                        \
+	PG_FUNCTION_INFO_V1(func_name);                                          \
+	Datum                                                                    \
+	func_name(PG_FUNCTION_ARGS)                                              \
+	{                                                                        \
+		int32 cmp = DatumGetInt32(DirectFunctionCall2(tde_iam_ope_bytea_cmp, \
+													  PG_GETARG_DATUM(0),    \
+													  PG_GETARG_DATUM(1)));  \
+		PG_RETURN_BOOL(cmp operator_macro 0);                                \
+	}
+
+/* Generate all 5 core boolean operators cleanly */
+DEFINE_OPE_BOOL_OP(tde_iam_ope_bytea_lt, <)
+DEFINE_OPE_BOOL_OP(tde_iam_ope_bytea_le, <=)
+DEFINE_OPE_BOOL_OP(tde_iam_ope_bytea_eq, ==)
+DEFINE_OPE_BOOL_OP(tde_iam_ope_bytea_ge, >=)
+DEFINE_OPE_BOOL_OP(tde_iam_ope_bytea_gt, >)
+
+/*
+ * Macro template to generate identical type-specific 3-way comparator wrappers.
+ * Since they all just forward directly to tde_iam_ope_bytea_cmp, we can automate them.
+ */
+#define DEFINE_OPE_CMP_FORWARD(func_name)                                                          \
+	PG_FUNCTION_INFO_V1(func_name);                                                                \
+	Datum                                                                                          \
+	func_name(PG_FUNCTION_ARGS)                                                                    \
+	{                                                                                              \
+		return DirectFunctionCall2(tde_iam_ope_bytea_cmp, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)); \
+	}
+
+/* Generate all typed 3-way comparator forwards */
+DEFINE_OPE_CMP_FORWARD(tde_iam_ope_text_cmp)
+DEFINE_OPE_CMP_FORWARD(tde_iam_ope_bpchar_cmp)
+DEFINE_OPE_CMP_FORWARD(tde_iam_ope_int4_cmp)
+DEFINE_OPE_CMP_FORWARD(tde_iam_ope_int8_cmp)
+DEFINE_OPE_CMP_FORWARD(tde_iam_ope_uuid_cmp)
+DEFINE_OPE_CMP_FORWARD(tde_iam_ope_date_cmp)
+DEFINE_OPE_CMP_FORWARD(tde_iam_ope_timestamptz_cmp)
+
+
+/*
+ * Check if the index relation is managed by tde_ope_btree by verifying that
+ * the access method utilizes our customized build routine.
  */
 bool
 tde_iam_is_ope_btree_index(Relation index_rel)
@@ -59,7 +125,10 @@ tde_iam_is_ope_btree_index(Relation index_rel)
 }
 
 /*
- * tde_iam_ope_serialize_fixed_type — serialize fixed-size types to canonical big-endian.
+ * tde_iam_ope_serialize_fixed_type — serialize fixed-size primitive types
+ * (INT4, DATE, INT8, TIMESTAMPTZ, UUID) to a canonical big-endian byte array,
+ * applying sign-bit inversion where appropriate to maintain correct physical
+ * sorting properties for signed numeric representations.
  */
 static void
 tde_iam_ope_serialize_fixed_type(Datum datum, Oid typoid, uint8 *buf)
@@ -116,7 +185,9 @@ tde_iam_ope_serialize_fixed_type(Datum datum, Oid typoid, uint8 *buf)
 }
 
 /*
- * tde_iam_ope_encrypt_fixed_type_datum — encrypt fixed-size Datum using ORE.
+ * tde_iam_ope_encrypt_fixed_type_datum — fetch the relation's Data Encryption Key (DEK),
+ * canonicalize the fixed-size Datum, and pass it to the ORE cryptographic engine
+ * to generate a dynamically allocated bytea ciphertext.
  */
 Datum
 tde_iam_ope_encrypt_fixed_type_datum(Relation index_rel, Datum datum, Oid typoid)
@@ -165,7 +236,10 @@ tde_iam_ope_encrypt_fixed_type_datum(Relation index_rel, Datum datum, Oid typoid
 }
 
 /*
- * tde_iam_ope_encrypt_index_datum — encrypt typed varlena Datum using ORE.
+ * tde_iam_ope_encrypt_index_datum — encrypt variable-length or non-primitive Datums.
+ * Extracts raw binary payload lengths safely for BYTEAOID geometries, converts text
+ * boundaries via standard strings, extracts the active DEK, and wraps the payload
+ * inside an ORE-encrypted bytea container.
  */
 Datum
 tde_iam_ope_encrypt_index_datum(Relation index_rel, Datum datum, bool typbyval, int16 typlen)
@@ -259,207 +333,6 @@ tde_iam_ope_encrypt_index_datum(Relation index_rel, Datum datum, bool typbyval, 
 	}
 }
 
-/*
- * tde_iam_ope_bytea_cmp — B-Tree support function 1 (three-way comparator).
- * Evaluates relative order of two ORE ciphertexts.
- *
- * Comparison algorithm:
- *
- *   For each block position i:
- *     1. Check whether prf_tag_a[i] == prf_tag_b[i].
- *        The prf_tag is derived from AES-ECB(SHA256(plaintext[0..i-1])).
- *        Equal tags mean both values share the same prefix[0..i-1].
- *
- *     2. If tags match: both blocks were encrypted with the same mask_byte
- *        (same AES input → same AES output → same mask_byte).  Deblind:
- *          plain_a = blinded_val_a ^ mask_byte_a
- *          plain_b = blinded_val_b ^ mask_byte_b   (mask_byte_a == mask_byte_b)
- *        Compare plain_a vs plain_b to determine order at this position.
- *        Return immediately on a mismatch.
- *
- *     3. If tags differ: the prefixes already diverged before block i.
- *        The ordering was determined in an earlier iteration that returned.
- *        Skip this block — the loop will fall through to the length tiebreak,
- *        which is correct because the values already compared equal on all
- *        positions where tags matched.
- *
- *   After the loop, if all common-prefix bytes compared equal, the shorter
- *   value is ordered first.
- */
-PG_FUNCTION_INFO_V1(tde_iam_ope_bytea_cmp);
-Datum
-tde_iam_ope_bytea_cmp(PG_FUNCTION_ARGS)
-{
-	bytea	   *a = PG_GETARG_BYTEA_PP(0);
-	bytea	   *b = PG_GETARG_BYTEA_PP(1);
-
-	/* Extract direct pointers to the serialized OpeDynamicPayload structures */
-	const char *ctxt_a = (const char *) VARDATA_ANY(a);
-	const char *ctxt_b = (const char *) VARDATA_ANY(b);
-
-	int			result = tde_crypto_ope_compare(ctxt_a, ctxt_b);
-
-	PG_RETURN_INT32(result);
-}
-
-/*
- * Boolean operator support functions for ORE bytea operator classes
- */
-PG_FUNCTION_INFO_V1(tde_iam_ope_bytea_lt);
-Datum
-tde_iam_ope_bytea_lt(PG_FUNCTION_ARGS)
-{
-	int32		cmp = DatumGetInt32(DirectFunctionCall2(tde_iam_ope_bytea_cmp,
-														PG_GETARG_DATUM(0),
-														PG_GETARG_DATUM(1)));
-
-	PG_RETURN_BOOL(cmp < 0);
-}
-
-PG_FUNCTION_INFO_V1(tde_iam_ope_bytea_le);
-Datum
-tde_iam_ope_bytea_le(PG_FUNCTION_ARGS)
-{
-	int32		cmp = DatumGetInt32(DirectFunctionCall2(tde_iam_ope_bytea_cmp,
-														PG_GETARG_DATUM(0),
-														PG_GETARG_DATUM(1)));
-
-	PG_RETURN_BOOL(cmp <= 0);
-}
-
-PG_FUNCTION_INFO_V1(tde_iam_ope_bytea_eq);
-Datum
-tde_iam_ope_bytea_eq(PG_FUNCTION_ARGS)
-{
-	int32		cmp = DatumGetInt32(DirectFunctionCall2(tde_iam_ope_bytea_cmp,
-														PG_GETARG_DATUM(0),
-														PG_GETARG_DATUM(1)));
-
-	PG_RETURN_BOOL(cmp == 0);
-}
-
-PG_FUNCTION_INFO_V1(tde_iam_ope_bytea_ge);
-Datum
-tde_iam_ope_bytea_ge(PG_FUNCTION_ARGS)
-{
-	int32		cmp = DatumGetInt32(DirectFunctionCall2(tde_iam_ope_bytea_cmp,
-														PG_GETARG_DATUM(0),
-														PG_GETARG_DATUM(1)));
-
-	PG_RETURN_BOOL(cmp >= 0);
-}
-
-PG_FUNCTION_INFO_V1(tde_iam_ope_bytea_gt);
-Datum
-tde_iam_ope_bytea_gt(PG_FUNCTION_ARGS)
-{
-	int32		cmp = DatumGetInt32(DirectFunctionCall2(tde_iam_ope_bytea_cmp,
-														PG_GETARG_DATUM(0),
-														PG_GETARG_DATUM(1)));
-
-	PG_RETURN_BOOL(cmp > 0);
-}
-
-/*
- * Fixed type support function 1 wrappers (delegating to tde_iam_ope_bytea_cmp)
- */
-PG_FUNCTION_INFO_V1(tde_iam_ope_text_cmp);
-Datum
-tde_iam_ope_text_cmp(PG_FUNCTION_ARGS)
-{
-	return DirectFunctionCall2(tde_iam_ope_bytea_cmp, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
-}
-
-PG_FUNCTION_INFO_V1(tde_iam_ope_int4_cmp);
-Datum
-tde_iam_ope_int4_cmp(PG_FUNCTION_ARGS)
-{
-	return DirectFunctionCall2(tde_iam_ope_bytea_cmp, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
-}
-
-PG_FUNCTION_INFO_V1(tde_iam_ope_int8_cmp);
-Datum
-tde_iam_ope_int8_cmp(PG_FUNCTION_ARGS)
-{
-	return DirectFunctionCall2(tde_iam_ope_bytea_cmp, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
-}
-
-PG_FUNCTION_INFO_V1(tde_iam_ope_uuid_cmp);
-Datum
-tde_iam_ope_uuid_cmp(PG_FUNCTION_ARGS)
-{
-	return DirectFunctionCall2(tde_iam_ope_bytea_cmp, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
-}
-
-PG_FUNCTION_INFO_V1(tde_iam_ope_date_cmp);
-Datum
-tde_iam_ope_date_cmp(PG_FUNCTION_ARGS)
-{
-	return DirectFunctionCall2(tde_iam_ope_bytea_cmp, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
-}
-
-PG_FUNCTION_INFO_V1(tde_iam_ope_timestamptz_cmp);
-Datum
-tde_iam_ope_timestamptz_cmp(PG_FUNCTION_ARGS)
-{
-	return DirectFunctionCall2(tde_iam_ope_bytea_cmp, PG_GETARG_DATUM(0), PG_GETARG_DATUM(1));
-}
-
-PG_FUNCTION_INFO_V1(tde_iam_ope_varchar_lt);
-Datum
-tde_iam_ope_varchar_lt(PG_FUNCTION_ARGS)
-{
-	Datum		a = PG_GETARG_DATUM(0);
-	Datum		b = PG_GETARG_DATUM(1);
-	int			cmp = DirectFunctionCall2(tde_iam_ope_text_cmp, a, b);
-
-	PG_RETURN_BOOL(cmp < 0);
-}
-
-PG_FUNCTION_INFO_V1(tde_iam_ope_varchar_le);
-Datum
-tde_iam_ope_varchar_le(PG_FUNCTION_ARGS)
-{
-	Datum		a = PG_GETARG_DATUM(0);
-	Datum		b = PG_GETARG_DATUM(1);
-	int			cmp = DirectFunctionCall2(tde_iam_ope_text_cmp, a, b);
-
-	PG_RETURN_BOOL(cmp <= 0);
-}
-
-PG_FUNCTION_INFO_V1(tde_iam_ope_varchar_gt);
-Datum
-tde_iam_ope_varchar_gt(PG_FUNCTION_ARGS)
-{
-	Datum		a = PG_GETARG_DATUM(0);
-	Datum		b = PG_GETARG_DATUM(1);
-	int			cmp = DirectFunctionCall2(tde_iam_ope_text_cmp, a, b);
-
-	PG_RETURN_BOOL(cmp > 0);
-}
-
-PG_FUNCTION_INFO_V1(tde_iam_ope_varchar_ge);
-Datum
-tde_iam_ope_varchar_ge(PG_FUNCTION_ARGS)
-{
-	Datum		a = PG_GETARG_DATUM(0);
-	Datum		b = PG_GETARG_DATUM(1);
-	int			cmp = DirectFunctionCall2(tde_iam_ope_text_cmp, a, b);
-
-	PG_RETURN_BOOL(cmp >= 0);
-}
-
-PG_FUNCTION_INFO_V1(tde_iam_ope_varchar_eq);
-Datum
-tde_iam_ope_varchar_eq(PG_FUNCTION_ARGS)
-{
-	Datum		a = PG_GETARG_DATUM(0);
-	Datum		b = PG_GETARG_DATUM(1);
-	int			cmp = DirectFunctionCall2(tde_iam_ope_text_cmp, a, b);
-
-	PG_RETURN_BOOL(cmp == 0);
-}
-
 /* ── B-TREE PROXY ACCESS METHOD IMPLEMENTATION ──────────────────────────── */
 
 static inline void
@@ -469,7 +342,10 @@ tde_ope_assert_not_impersonated(Relation index)
 }
 
 /*
- * pg_vault_tde_ope_ambuild — delegates to btree's ambuild with relam impersonation.
+ * pg_vault_tde_ope_ambuild — proxy index builder. Temporarily patches the index
+ * relation's amoid/relam identifier to mask as a standard BTREE_AM_OID, executes
+ * the underlying native btree build routine, and safely restores the original AM identifier
+ * during success or cleanup stack-unwinding.
  */
 static IndexBuildResult *
 pg_vault_tde_ope_ambuild(Relation heap, Relation index, IndexInfo *index_info)
@@ -498,7 +374,10 @@ pg_vault_tde_ope_ambuild(Relation heap, Relation index, IndexInfo *index_info)
 }
 
 /*
- * pg_vault_tde_ope_aminsert — encrypts values[] with ORE and forwards to btree's aminsert.
+ * pg_vault_tde_ope_aminsert — proxy index tuple insertion interceptor. Intercepts incoming
+ * raw Datums, routes them through type-specific ORE encryption handlers based on attribute
+ * metadata, temporarily switches relam contexts to standard B-Tree, and delegates the
+ * physical insertion to the native B-Tree engine.
  */
 static bool
 pg_vault_tde_ope_aminsert(Relation index, Datum *values, bool *isnull,
@@ -573,7 +452,8 @@ pg_vault_tde_ope_aminsert(Relation index, Datum *values, bool *isnull,
 }
 
 /*
- * pg_vault_tde_ope_ambeginscan — delegates directly to btree.
+ * pg_vault_tde_ope_ambeginscan — proxy scanner allocation. Forwards tracking allocations
+ * directly to the native btree implementation table.
  */
 static IndexScanDesc
 pg_vault_tde_ope_ambeginscan(Relation index, int nkeys, int norderbys)
@@ -584,7 +464,10 @@ pg_vault_tde_ope_ambeginscan(Relation index, int nkeys, int norderbys)
 }
 
 /*
- * pg_vault_tde_ope_amrescan — intercept scan keys for ALL 5 strategy operators.
+ * pg_vault_tde_ope_amrescan — proxy scan key processor. Intercepts query bounds constraints,
+ * encrypts literal comparison arguments into ORE ciphertexts, overrides comparison support functions
+ * (`sk_func`) with safe bytea operators for the 5 basic B-Tree strategies, and forwards the
+ * modified keys to the native B-Tree driver.
  */
 static void
 pg_vault_tde_ope_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
@@ -667,7 +550,9 @@ pg_vault_tde_ope_amrescan(IndexScanDesc scan, ScanKey keys, int nkeys,
 }
 
 /*
- * pg_vault_tde_ope_amvalidate — validates ORE operator classes.
+ * pg_vault_tde_ope_amvalidate — proxy operator class validator. Extends standard index
+ * AM verification constraints to natively allow encrypted operator classes containing cross-type
+ * bytea structural storage signatures (`opckeytype` == BYTEAOID).
  */
 static bool
 pg_vault_tde_ope_amvalidate(Oid opclassoid)
@@ -697,7 +582,10 @@ pg_vault_tde_ope_amvalidate(Oid opclassoid)
 }
 
 /*
- * tde_ope_iam_init — initialize tde_ope_btree access method routine table.
+ * tde_ope_iam_init — system bootstrap hook for the OPE proxy access method.
+ * Extracts native B-Tree handler callbacks, clones them into a mutable structure, overrides
+ * structural interfaces (`ambuild`, `aminsert`, `amrescan`, `amvalidate`), sets AM storage flags,
+ * and handles localized cryptographic module workspace contexts.
  */
 void
 tde_ope_iam_init(void)
@@ -731,7 +619,7 @@ tde_ope_iam_init(void)
 }
 
 /*
- * Free per-backend ORE contexts.
+ * Free per-backend ORE cryptographic context objects during backend shutdown or cleanup loops.
  */
 void
 tde_ope_iam_ctx_cleanup(void)
@@ -740,7 +628,9 @@ tde_ope_iam_ctx_cleanup(void)
 }
 
 /*
- * pg_vault_tde_get_iam_ope_routine — returns a freshly palloc'd copy of tde_ope_btree_methods.
+ * pg_vault_tde_get_iam_ope_routine — returns a dynamically allocated copy of our
+ * customized OPE B-Tree IndexAmRoutine method table. Bootstraps the subsystem
+ * automatically on first invocation.
  */
 const IndexAmRoutine *
 pg_vault_tde_get_iam_ope_routine(void)

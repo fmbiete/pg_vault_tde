@@ -3,6 +3,30 @@
  *
  * Copyright (c) 2026 Francisco Miguel Biete Banon
  * Licensed under the PostgreSQL License.
+ *
+ * DESIGN RATIONALE:
+ * -----------------
+ * This module implements a lightweight, deterministic Order-Revealing/Preserving
+ * Encryption (ORE/OPE) scheme optimized for byte-by-byte lexicographical comparisons
+ * within PostgreSQL indexes.
+ *
+ * Traditional OPE schemes map values across wide numeric distributions. This implementation
+ * instead constructs a strictly monotonic 1-to-1 byte substitution map (0-255) derived
+ * deterministically from the Data Encryption Key (DEK) via an OpenSSL HMAC-SHA256 Pseudo-Random
+ * Function (PRF).
+ *
+ * Core Features:
+ * 1. Monotonic Substitution Map: Maps each input plaintext byte into a unique, higher-indexed
+ *    ciphertext byte, preventing collisions and preserving natural sort order natively.
+ * 2. C-String Safety: The byte map eliminates the null byte (0x00) from active cipher blocks,
+ *    safeguarding database text processing functions against premature termination.
+ * 3. Dynamic Length Appending: A terminating 0x00 followed by the true payload size is appended
+ *    to the ciphertext buffer. This enables length extraction without requiring a separate tracking
+ *    header structure.
+ * 4. Index-Optimized Comparison: Operates as an active substitution cipher that allows binary sorting
+ *    algorithms (like memcmp) or custom index comparators to execute correct SQL sort and range operators
+ *    directly on encrypted strings.
+
  */
 
 #include "postgres.h"
@@ -37,6 +61,12 @@ static OpeCacheSlot encrypt_slot =
 		false
 };
 
+/*
+ * tde_crypto_ope_ctx_init
+ *
+ * Lazily allocates and initializes the OpenSSL HMAC context structure inside the
+ * PostgreSQL TopMemoryContext to persist across transaction boundaries.
+ */
 void
 tde_crypto_ope_ctx_init(void)
 {
@@ -49,6 +79,12 @@ tde_crypto_ope_ctx_init(void)
 	}
 }
 
+/*
+ * tde_crypto_ope_ctx_cleanup
+ *
+ * Frees the OpenSSL HMAC context and securely zeroes out memory slots storing
+ * cached Data Encryption Keys (DEK) and order-preserving cryptographic maps.
+ */
 void
 tde_crypto_ope_ctx_cleanup(void)
 {
@@ -62,6 +98,12 @@ tde_crypto_ope_ctx_cleanup(void)
 	encrypt_slot.is_valid = false;
 }
 
+/*
+ * bytes_to_hex_string
+ *
+ * Allocates memory within the PostgreSQL memory context and converts a raw binary
+ * byte buffer into a null-terminated lowercase hexadecimal string representation.
+ */
 char *
 bytes_to_hex_string(const char *src, int len)
 {
@@ -81,6 +123,12 @@ bytes_to_hex_string(const char *src, int len)
 	return dst;
 }
 
+/*
+ * get_index_pseudo_random_expansion
+ *
+ * Executes an HMAC-SHA256 iteration using the active DEK key context over a strictly
+ * structured index context frame to yield a deterministic pseudorandom data expansion block.
+ */
 static void
 get_index_pseudo_random_expansion(Size index, unsigned char *out_prf_block)
 {
@@ -102,6 +150,8 @@ get_index_pseudo_random_expansion(Size index, unsigned char *out_prf_block)
 }
 
 /*
+ * build_order_preserving_key_map
+ *
  * Generates a strictly monotonic substitution map derived from the DEK.
  * This guarantees order preservation byte-by-byte while securing the mapping.
  */
@@ -158,6 +208,12 @@ build_order_preserving_key_map(void)
 	}
 }
 
+/*
+ * extract_ciphertext_len
+ *
+ * Parses the dynamic OPE payload to find the internal null-byte sentinel delimiter,
+ * reading the subsequent bytes to extract the true ciphertext length attribute.
+ */
 static uint32_t
 extract_ciphertext_len(const OpeDynamicPayload * payload)
 {
@@ -175,13 +231,20 @@ extract_ciphertext_len(const OpeDynamicPayload * payload)
 	return len;
 }
 
+/*
+ * tde_crypto_ope_encrypt
+ *
+ * Encrypts arbitrary input plaintext bytes into an order-preserving format using
+ * the monotonic substitution map, dynamically suffixing length specifiers. Returns
+ * a palloc'd OpeDynamicPayload structure container pointer.
+ */
 char *
 tde_crypto_ope_encrypt(const char *dek,
 					   const char *plaintext, Size plaintext_len,
 					   Size *out_len)
 {
 	OpeDynamicPayload *payload;
-	Size		cyphertext_len = plaintext_len < MAX_OPE_BYTES ? plaintext_len : MAX_OPE_BYTES;
+	Size		cyphertext_len = Min(plaintext_len, MAX_OPE_BYTES);
 	Size		header_size = sizeof(uint32_t) + 1;
 
 	*out_len = header_size + cyphertext_len;
@@ -221,6 +284,7 @@ tde_crypto_ope_encrypt(const char *dek,
 	payload->ciphertext[cyphertext_len] = 0x00;
 	memcpy(&payload->ciphertext[cyphertext_len + 1], &cyphertext_len, sizeof(uint32_t));
 
+/*
 	{
 		uint32_t	extracted_cipher_len = extract_ciphertext_len(payload);
 		char	   *plaintext_hex = bytes_to_hex_string(plaintext, plaintext_len);
@@ -233,10 +297,18 @@ tde_crypto_ope_encrypt(const char *dek,
 		pfree(plaintext_hex);
 		pfree(dek_hex);
 	}
+*/
 
 	return (char *) payload;
 }
 
+/*
+ * tde_crypto_ope_compare
+ *
+ * Compares two order-preserving ciphertexts byte-by-byte. Emulates a SQL standard
+ * sorting routine returning a negative integer, zero, or a positive integer depending
+ * on whether the underlying plaintext values are less than, equal to, or greater than each other.
+ */
 int
 tde_crypto_ope_compare(const char *ctxt1, const char *ctxt2)
 {
@@ -267,7 +339,7 @@ tde_crypto_ope_compare(const char *ctxt1, const char *ctxt2)
 	p1_len = extract_ciphertext_len(p1);
 	p2_len = extract_ciphertext_len(p2);
 
-	min_len = (p1_len < p2_len) ? p1_len : p2_len;
+	min_len = Min(p1_len, p2_len);
 
 	final_res = 0;
 	for (uint32_t i = 0; i < min_len; i++)
@@ -296,6 +368,7 @@ tde_crypto_ope_compare(const char *ctxt1, const char *ctxt2)
 	final_res = 0;
 
 log_and_return:
+/*
 	if (p1 && p2)
 	{
 		uint32_t	l1 = extract_ciphertext_len(p1);
@@ -308,5 +381,6 @@ log_and_return:
 		pfree(p1_hex);
 		pfree(p2_hex);
 	}
+*/
 	return final_res;
 }

@@ -1,5 +1,5 @@
 /*
- * pg_vault_tde_crypto_ope.h - Order Preserving Encryption using AES-256-ECB
+ * pg_vault_tde_crypto_ope.h - Order Preserving Encryption
  *
  * Copyright (c) 2026 Francisco Miguel Biete Banon
  * Licensed under the PostgreSQL License.
