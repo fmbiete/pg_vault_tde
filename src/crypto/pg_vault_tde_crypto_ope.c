@@ -20,13 +20,11 @@
  *    ciphertext byte, preventing collisions and preserving natural sort order natively.
  * 2. C-String Safety: The byte map eliminates the null byte (0x00) from active cipher blocks,
  *    safeguarding database text processing functions against premature termination.
- * 3. Dynamic Length Appending: A terminating 0x00 followed by the true payload size is appended
- *    to the ciphertext buffer. This enables length extraction without requiring a separate tracking
+ * 3. Dynamic Length Appending: A terminating 0x00 is appended to the ciphertext buffer.
  *    header structure.
- * 4. Index-Optimized Comparison: Operates as an active substitution cipher that allows binary sorting
- *    algorithms (like memcmp) or custom index comparators to execute correct SQL sort and range operators
- *    directly on encrypted strings.
-
+ * 4. Index-Optimized Comparison: Because the encryption guarantees that no 0x00 is present.
+ *    execpt the terminating one, we can use a trivial strcmp or memcmp with length.
+ *
  */
 
 #include "postgres.h"
@@ -209,53 +207,25 @@ build_order_preserving_key_map(void)
 }
 
 /*
- * extract_ciphertext_len
- *
- * Parses the dynamic OPE payload to find the internal null-byte sentinel delimiter,
- * reading the subsequent bytes to extract the true ciphertext length attribute.
- */
-static uint32_t
-extract_ciphertext_len(const OpeDynamicPayload * payload)
-{
-	uint32_t	len = 0;
-	const unsigned char *ptr = payload->ciphertext;
-
-	for (int i = 0; i < MAX_OPE_BYTES; i++)
-	{
-		if (ptr[i] == 0x00)
-		{
-			memcpy(&len, &ptr[i + 1], sizeof(uint32_t));
-			break;
-		}
-	}
-	return len;
-}
-
-/*
  * tde_crypto_ope_encrypt
  *
  * Encrypts arbitrary input plaintext bytes into an order-preserving format using
  * the monotonic substitution map, dynamically suffixing length specifiers. Returns
- * a palloc'd OpeDynamicPayload structure container pointer.
+ * a palloc'd char pointer.
  */
 char *
 tde_crypto_ope_encrypt(const char *dek,
 					   const char *plaintext, Size plaintext_len,
 					   Size *out_len)
 {
-	OpeDynamicPayload *payload;
+	char	   *ciphertext;
 	Size		cyphertext_len = Min(plaintext_len, MAX_OPE_BYTES);
-	Size		header_size = sizeof(uint32_t) + 1;
-
-	*out_len = header_size + cyphertext_len;
-	payload = (OpeDynamicPayload *) palloc0(*out_len);
 
 	if (encrypt_slot.ctx == NULL)
 	{
 		tde_crypto_ope_ctx_init();
 		if (encrypt_slot.ctx == NULL)
 		{
-			pfree(payload);
 			elog(ERROR, "[CRYPTO-OPE] Context allocation failure");
 		}
 	}
@@ -265,7 +235,6 @@ tde_crypto_ope_encrypt(const char *dek,
 		if (!HMAC_Init_ex(encrypt_slot.ctx, dek, TDE_DEK_LEN, EVP_sha256(), NULL))
 		{
 			tde_crypto_ope_ctx_cleanup();
-			pfree(payload);
 			elog(ERROR, "[CRYPTO-OPE] Cipher initialization failure");
 		}
 		memcpy(encrypt_slot.cached_key, dek, TDE_DEK_LEN);
@@ -274,32 +243,31 @@ tde_crypto_ope_encrypt(const char *dek,
 		encrypt_slot.is_valid = true;
 	}
 
+	*out_len = cyphertext_len + 1;	/* adding final 0x00 */
+	ciphertext = (char *) palloc0(*out_len);
+
 	for (Size i = 0; i < cyphertext_len; i++)
 	{
-		uint8_t		pt_byte = (uint8_t) plaintext[i];
-
-		payload->ciphertext[i] = encrypt_slot.crypto_map[pt_byte];
+		ciphertext[i] = encrypt_slot.crypto_map[(uint8_t) plaintext[i]];
 	}
 
-	payload->ciphertext[cyphertext_len] = 0x00;
-	memcpy(&payload->ciphertext[cyphertext_len + 1], &cyphertext_len, sizeof(uint32_t));
+	ciphertext[cyphertext_len] = 0x00;
 
 /*
 	{
-		uint32_t	extracted_cipher_len = extract_ciphertext_len(payload);
 		char	   *plaintext_hex = bytes_to_hex_string(plaintext, plaintext_len);
 		char	   *dek_hex = bytes_to_hex_string(dek, TDE_DEK_LEN);
 		char	   *ciphertext_hex = bytes_to_hex_string((const char *) payload->ciphertext, cyphertext_len);
 
-		elog(DEBUG1, "[pg_vault_tde:tde_crypto_ope_encrypt] plaintext: (%lu) '%s' - ciphertext: (%lu) [%u] '%s' - dek: (%u) '%s'",
-			 plaintext_len, plaintext_hex, cyphertext_len, extracted_cipher_len, ciphertext_hex, TDE_DEK_LEN, dek_hex);
+		elog(DEBUG1, "[pg_vault_tde:tde_crypto_ope_encrypt] plaintext: (%lu) '%s' - ciphertext: (%lu) '%s' - dek: (%u) '%s'",
+			 plaintext_len, plaintext_hex, cyphertext_len, ciphertext_hex, TDE_DEK_LEN, dek_hex);
 		pfree(ciphertext_hex);
 		pfree(plaintext_hex);
 		pfree(dek_hex);
 	}
 */
 
-	return (char *) payload;
+	return ciphertext;
 }
 
 /*
@@ -312,72 +280,39 @@ tde_crypto_ope_encrypt(const char *dek,
 int
 tde_crypto_ope_compare(const char *ctxt1, const char *ctxt2)
 {
-	uint32_t	p1_len;
-	uint32_t	p2_len;
-	uint32_t	min_len;
 	int			final_res;
 
-	const		OpeDynamicPayload *p1 = (const OpeDynamicPayload *) ctxt1;
-	const		OpeDynamicPayload *p2 = (const OpeDynamicPayload *) ctxt2;
-
-	if (!p1 && !p2)
+	if (!ctxt1 && !ctxt2)
 	{
 		final_res = 0;
 		goto log_and_return;
 	}
-	if (!p1)
+	if (!ctxt1)
 	{
 		final_res = -1;
 		goto log_and_return;
 	}
-	if (!p2)
+	if (!ctxt2)
 	{
 		final_res = 1;
 		goto log_and_return;
 	}
 
-	p1_len = extract_ciphertext_len(p1);
-	p2_len = extract_ciphertext_len(p2);
-
-	min_len = Min(p1_len, p2_len);
-
-	final_res = 0;
-	for (uint32_t i = 0; i < min_len; i++)
-	{
-		uint8_t		byte1 = (uint8_t) p1->ciphertext[i];
-		uint8_t		byte2 = (uint8_t) p2->ciphertext[i];
-
-		if (byte1 != byte2)
-		{
-			final_res = (byte1 < byte2) ? -1 : 1;
-			goto log_and_return;
-		}
-	}
-
-	if (p1_len < p2_len)
-	{
-		final_res = -1;
-		goto log_and_return;
-	}
-	if (p1_len > p2_len)
-	{
-		final_res = 1;
-		goto log_and_return;
-	}
-
-	final_res = 0;
+	/*
+	 * A simple byte-by-byte string comparison is entirely sufficient and
+	 * accurately matches the natural sort order of the plaintext.
+	 */
+	final_res = strcmp(ctxt1, ctxt2);
 
 log_and_return:
 /*
-	if (p1 && p2)
+	if (ctxt1 && ctxt2)
 	{
-		uint32_t	l1 = extract_ciphertext_len(p1);
-		uint32_t	l2 = extract_ciphertext_len(p2);
-		char	   *p1_hex = bytes_to_hex_string((const char *) p1->ciphertext, l1);
-		char	   *p2_hex = bytes_to_hex_string((const char *) p2->ciphertext, l2);
+		char	   *p1_hex = bytes_to_hex_string(ctxt1, strlen(ctxt1));
+		char	   *p2_hex = bytes_to_hex_string(ctxt2, strlen(ctxt2));
 
 		elog(DEBUG1, "[pg_vault_tde:tde_crypto_ope_compare] comparison: %d - ctxt1: (%d) '%s' - ctxt2: (%d) '%s'",
-			 final_res, l1, p1_hex, l2, p2_hex);
+			 final_res, strlen(ctxt1), p1_hex, strlen(ctxt2), p2_hex);
 		pfree(p1_hex);
 		pfree(p2_hex);
 	}

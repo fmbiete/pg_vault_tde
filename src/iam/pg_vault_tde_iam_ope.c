@@ -59,7 +59,7 @@ tde_iam_ope_bytea_cmp(PG_FUNCTION_ARGS)
 	bytea	   *a = PG_GETARG_BYTEA_PP(0);
 	bytea	   *b = PG_GETARG_BYTEA_PP(1);
 
-	/* Extract direct pointers to the serialized OpeDynamicPayload structures */
+	/* Extract direct pointers to the char * */
 	const char *ctxt_a = (const char *) VARDATA_ANY(a);
 	const char *ctxt_b = (const char *) VARDATA_ANY(b);
 

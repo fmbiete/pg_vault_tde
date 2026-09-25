@@ -10,19 +10,6 @@
 
 #include "postgres.h"
 
-/*
- * GNU Zero-length array adaptation inside an anonymous union.
- * Forces payload array offset to exactly 0 bytes while remaining compiler clean.
- */
-typedef struct OpeDynamicPayload
-{
-	union
-	{
-		unsigned char first_byte;
-		unsigned char ciphertext[0];
-	};
-}			OpeDynamicPayload;
-
 void		tde_crypto_ope_ctx_init(void);
 void		tde_crypto_ope_ctx_cleanup(void);
 
